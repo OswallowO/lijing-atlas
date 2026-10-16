@@ -1,0 +1,297 @@
+// 麗京原生版著色器（地形、海面、建物、道路、地標網格、軌道路線帶）
+
+struct Globals {
+  view_proj: mat4x4<f32>,
+  cam_pos: vec4<f32>,     // xyz, w = 時間（秒）
+  sun_dir: vec4<f32>,     // xyz, w = 夜間 0..1
+  sun_col: vec4<f32>,     // rgb, w = 霧密度
+  sky_col: vec4<f32>,     // rgb, w = 年份
+  ground_col: vec4<f32>,  // rgb, w = 模式（0 一般、2 等高線）
+  fog_col: vec4<f32>,     // rgb, w = 淡化（運輸模式）
+  cs2: vec4<f32>,         // 框心 x, y, 半邊長, 旋轉
+  cs2b: vec4<f32>,        // 格數, 開關, 熱區開關, 每像素公尺
+  tb: vec4<f32>,          // 地形 xmin, xmax, ymin, ymax
+  tex: vec4<f32>,         // 1/w, 1/h, 每像素公尺, 畫面高
+  conc: vec4<f32>,        // 未包覆外牆色
+  glass: vec4<f32>,       // 玻璃色
+  heat_b: vec4<f32>,      // 熱區範圍
+  type_col: array<vec4<f32>, 12>,
+  groups: array<vec4<f32>, 16>, // 群組可見度（地標／路線）
+};
+@group(0) @binding(0) var<uniform> G: Globals;
+@group(0) @binding(1) var h_tex: texture_2d<f32>;
+@group(0) @binding(2) var g_tex: texture_2d<f32>;
+@group(0) @binding(3) var c_tex: texture_2d<f32>;
+@group(0) @binding(4) var lin_s: sampler;
+@group(0) @binding(5) var heat_tex: texture_2d<f32>;
+
+fn light(base: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+  let d = max(dot(n, G.sun_dir.xyz), 0.0);
+  let amb = mix(G.ground_col.rgb, G.sky_col.rgb, n.y * 0.5 + 0.5);
+  return base * (amb * 0.62 + G.sun_col.rgb * d * 0.75);
+}
+fn fog(c: vec3<f32>, dist: f32) -> vec3<f32> {
+  let f = 1.0 - exp(-pow(G.sun_col.w * dist, 2.0));
+  return mix(c, G.fog_col.rgb, clamp(f, 0.0, 1.0));
+}
+fn hash3(p0: vec3<f32>) -> f32 {
+  var p = fract(p0 * 0.3183099 + 0.1); p = p * 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+fn grid_line(v: f32, w: f32) -> f32 {
+  let d = abs(fract(v - 0.5) - 0.5) / max(fwidth(v), 1e-5);
+  return 1.0 - clamp(d / w, 0.0, 1.0);
+}
+fn uv_of(x: f32, z: f32) -> vec2<f32> {
+  return vec2<f32>((x - G.tb.x) / (G.tb.y - G.tb.x), (G.tb.w + z) / (G.tb.w - G.tb.z));
+}
+fn group_vis(g: u32) -> f32 { return G.groups[g / 4u][g % 4u]; }
+// sRGB 輸出：目標格式為 sRGB 時由硬體轉換，這裡輸出線性值
+fn to_lin(c: vec3<f32>) -> vec3<f32> { return pow(c, vec3<f32>(2.2)); }
+
+// CS2 框：回傳（框內與否, 格線強度）；含 fwidth，須在一致控制流中呼叫
+fn cs2_factors(wx: f32, wz: f32, cell_on: bool) -> vec2<f32> {
+  var p = vec2<f32>(wx - G.cs2.x, -wz - G.cs2.y);
+  let cr = cos(G.cs2.w); let sr = sin(G.cs2.w);
+  p = vec2<f32>(p.x * cr + p.y * sr, -p.x * sr + p.y * cr);
+  let q = p / (2.0 * G.cs2.z) + 0.5;
+  let inside = step(0.0, q.x) * step(q.x, 1.0) * step(0.0, q.y) * step(q.y, 1.0);
+  let tl = max(grid_line(q.x * G.cs2b.x, 0.7), grid_line(q.y * G.cs2b.x, 0.7)) * inside;
+  let cl = max(grid_line(p.x / 8.0, 0.6), grid_line(p.y / 8.0, 0.6)) * inside * select(0.0, 1.0, cell_on);
+  let fr = max(grid_line(q.x, 1.6) * step(0.0, q.y) * step(q.y, 1.0), grid_line(q.y, 1.6) * step(0.0, q.x) * step(q.x, 1.0));
+  return vec2<f32>(inside, clamp(tl * 0.55 + cl * 0.25 + fr, 0.0, 1.0));
+}
+fn cs2_apply(col: vec3<f32>, f: vec2<f32>) -> vec3<f32> {
+  let c = mix(col, col * 0.55, (1.0 - f.x) * 0.8);
+  return mix(c, to_lin(vec3<f32>(0.05, 0.5, 0.53)), f.y);
+}
+
+// ---------------- 地形 ----------------
+struct TOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) w: vec3<f32>,
+  @location(1) n: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) h: f32,
+};
+fn H(uv: vec2<f32>) -> f32 { return textureSampleLevel(h_tex, lin_s, uv, 0.0).r; }
+fn SD(uv: vec2<f32>) -> f32 { return (textureSampleLevel(c_tex, lin_s, uv, 0.0).r * 255.0 - 128.0) * 2.0; }
+
+@vertex
+fn vs_terrain(@location(0) p: vec3<f32>, @location(1) tile: vec3<f32>) -> TOut {
+  var o: TOut;
+  let xz = tile.xy + p.xz * tile.z;
+  let uv = uv_of(xz.x, xz.y);
+  var h = H(uv);
+  let hx = H(uv + vec2<f32>(G.tex.x, 0.0)) - H(uv - vec2<f32>(G.tex.x, 0.0));
+  let hz = H(uv + vec2<f32>(0.0, G.tex.y)) - H(uv - vec2<f32>(0.0, G.tex.y));
+  o.n = normalize(vec3<f32>(-hx / (2.0 * G.tex.z), 1.0, -hz / (2.0 * G.tex.z)));
+  let sd = SD(uv);
+  if (sd < 60.0) { h = min(h, sd); }
+  if (sd > 0.0) { h = max(h, min(sd * 0.5, 0.5)); }
+  o.h = h;
+  if (p.y < -0.5) { h = h - 80.0; }
+  o.w = vec3<f32>(xz.x, h, xz.y);
+  o.uv = uv;
+  o.pos = G.view_proj * vec4<f32>(o.w, 1.0);
+  return o;
+}
+fn hypso(h: f32) -> vec3<f32> {
+  var c = vec3<f32>(0.77, 0.84, 0.67);
+  c = mix(c, vec3<f32>(0.90, 0.89, 0.70), smoothstep(10.0, 60.0, h));
+  c = mix(c, vec3<f32>(0.92, 0.82, 0.62), smoothstep(60.0, 140.0, h));
+  c = mix(c, vec3<f32>(0.80, 0.62, 0.42), smoothstep(140.0, 260.0, h));
+  c = mix(c, vec3<f32>(0.60, 0.44, 0.36), smoothstep(260.0, 420.0, h));
+  return c;
+}
+@fragment
+fn fs_terrain(i: TOut) -> @location(0) vec4<f32> {
+  var base = textureSample(g_tex, lin_s, i.uv).rgb;
+  let n = normalize(i.n);
+  let minor = grid_line(i.h / 10.0, 1.0) * step(0.5, i.h);
+  let major = grid_line(i.h / 50.0, 1.3) * step(0.5, i.h);
+  let huv = vec2<f32>((i.w.x - G.heat_b.x) / (G.heat_b.y - G.heat_b.x), (G.heat_b.w + i.w.z) / (G.heat_b.w - G.heat_b.z));
+  let hk = textureSample(heat_tex, lin_s, huv).r;
+  let cf = cs2_factors(i.w.x, i.w.z, true);
+  if (G.ground_col.w > 1.5) {
+    if (i.h > 0.5) { base = mix(base, to_lin(hypso(i.h)), 0.85); }
+    base = mix(base, to_lin(vec3<f32>(0.45, 0.30, 0.15)), max(minor * 0.7, major));
+  }
+  if (G.cs2b.z > 0.5) {
+    let hc = mix(vec3<f32>(0.99, 0.91, 0.69), vec3<f32>(0.89, 0.34, 0.30), smoothstep(0.3, 0.9, hk));
+    base = mix(base, to_lin(hc), smoothstep(0.08, 0.5, hk) * 0.75);
+  }
+  var col = light(base, n);
+  let night = G.sun_dir.w;
+  if (night > 0.0) {
+    let lum = dot(base, vec3<f32>(0.3, 0.5, 0.2));
+    let urban = smoothstep(0.62, 0.78, lum) * step(0.5, i.h);
+    col = mix(col, col * 0.18 + vec3<f32>(0.002, 0.003, 0.006), night) + night * urban * vec3<f32>(0.02, 0.012, 0.004);
+  }
+  if (G.cs2b.y > 0.5) { col = cs2_apply(col, cf); }
+  col = fog(col, length(i.w - G.cam_pos.xyz));
+  return vec4<f32>(col, 1.0);
+}
+
+// ---------------- 海面 ----------------
+struct WOut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32> };
+@vertex
+fn vs_water(@location(0) p: vec3<f32>) -> WOut {
+  var o: WOut; o.w = p; o.pos = G.view_proj * vec4<f32>(p, 1.0); return o;
+}
+@fragment
+fn fs_water(i: WOut) -> @location(0) vec4<f32> {
+  let uv = uv_of(i.w.x, i.w.z);
+  let outside = uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0;
+  var h = -40.0; var sd = -256.0;
+  if (!outside) {
+    h = min(textureSampleLevel(h_tex, lin_s, uv, 0.0).r, 0.0);
+    sd = (textureSampleLevel(c_tex, lin_s, uv, 0.0).r * 255.0 - 128.0) * 2.0;
+  }
+  let aa = max(fwidth(sd), 0.5);
+  let cf = cs2_factors(i.w.x, i.w.z, false);
+  let alpha = clamp(0.5 - sd / aa, 0.0, 1.0);
+  if (alpha < 0.01) { discard; }
+  h = min(h, sd * 0.6);
+  let depth = clamp(-h / 30.0, 0.0, 1.0);
+  let base = to_lin(mix(vec3<f32>(0.47, 0.72, 0.78), vec3<f32>(0.16, 0.36, 0.52), sqrt(depth)));
+  let t = G.cam_pos.w;
+  let wv = sin(i.w.x * 0.05 + t * 0.8) * sin(i.w.z * 0.043 - t * 0.6) + sin((i.w.x + i.w.z) * 0.11 + t * 1.3) * 0.5;
+  let n = normalize(vec3<f32>(wv * 0.03, 1.0, wv * 0.02));
+  let v = normalize(G.cam_pos.xyz - i.w);
+  let spec = pow(max(dot(reflect(-G.sun_dir.xyz, n), v), 0.0), 120.0);
+  let fres = pow(1.0 - max(dot(v, vec3<f32>(0.0, 1.0, 0.0)), 0.0), 4.0);
+  let night = G.sun_dir.w;
+  var col = light(base, n) + G.sun_col.rgb * spec * 0.6 * (1.0 - night) + G.sky_col.rgb * fres * 0.35;
+  col = mix(col, col * 0.2 + vec3<f32>(0.0005, 0.001, 0.003), night);
+  if (G.cs2b.y > 0.5) { col = cs2_apply(col, cf); }
+  col = fog(col, length(i.w - G.cam_pos.xyz));
+  return vec4<f32>(col, alpha);
+}
+
+// ---------------- 建物 ----------------
+struct BOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) w: vec3<f32>,
+  @location(1) n: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) @interpolate(flat) m: vec4<u32>,
+};
+@vertex
+fn vs_bld(@location(0) p: vec3<f32>, @location(1) n: vec4<f32>, @location(2) uv: vec2<f32>, @location(3) m: vec4<u32>) -> BOut {
+  var o: BOut; o.w = p; o.n = n.xyz; o.uv = uv; o.m = m;
+  // 時間軸：尚未興建或已拆除者縮成退化三角形（不必進片段著色器）
+  let year = G.sky_col.w;
+  let y = f32(m.y); let dd = f32(m.w >> 4u);
+  var hide = (y > 0.5 && year < 1900.0 + y) || (dd > 0.5 && year >= 2010.0 + dd);
+  o.pos = G.view_proj * vec4<f32>(p, 1.0);
+  if (hide) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  return o;
+}
+@fragment
+fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
+  let ti = i32(i.m.x); let cyv = f32(i.m.z); let va = f32(i.m.w & 15u);
+  let year = G.sky_col.w; let night = G.sun_dir.w;
+  var base = G.type_col[clamp(ti, 0, 11)].rgb;
+  base = base * (0.95 + 0.05 * (va % 4.0) / 3.0);
+  if (cyv > 0.5 && year < 1900.0 + cyv) { base = G.conc.rgb; }
+  let n = normalize(i.n);
+  var emis = vec3<f32>(0.0);
+  var fh = 3.2; if (ti == 0 || ti == 8) { fh = 4.0; }
+  var cw = 3.2; if (ti == 8) { cw = 2.4; } else if (ti == 3) { cw = 4.0; }
+  let cx = i.uv.x / cw;
+  let aa = clamp(1.6 - max(fwidth(cx), fwidth(i.uv.y / fh)) * 2.2, 0.0, 1.0);
+  if (abs(n.y) < 0.5 && ti != 9) {
+    let fl = floor(i.uv.y / fh); let fy = fract(i.uv.y / fh);
+    let fx = fract(cx);
+    var win = step(0.28, fy) * step(fy, 0.86) * step(0.14, fx) * step(fx, 0.86) * step(1.0, fl);
+    win = mix(0.3 * step(1.0, fl + 0.5), win, aa);
+    var glassy = 0.22; if (ti == 8) { glassy = 0.55; } else if (ti == 0 || ti == 1) { glassy = 0.35; }
+    if (ti == 10 || ti == 11) { glassy = 0.12; }
+    base = mix(base, G.glass.rgb, win * glassy);
+    var lit = step(0.52, hash3(vec3<f32>(floor(cx), fl, floor(i.w.x * 0.02) + floor(i.w.z * 0.02))));
+    let wc = mix(vec3<f32>(1.0, 0.6, 0.2), vec3<f32>(0.4, 0.7, 1.0), step(0.7, hash3(vec3<f32>(fl, floor(cx) * 1.3, va))));
+    lit = mix(0.3, lit, aa);
+    emis = win * lit * wc * night * 1.1;
+    base = base * (0.78 + 0.22 * clamp(i.uv.y / 8.0, 0.0, 1.0));
+  }
+  var col = light(base, n);
+  col = mix(col, col * 0.22, night) + emis;
+  col = mix(col, vec3<f32>(0.85), G.fog_col.w * 0.55);
+  col = fog(col, length(i.w - G.cam_pos.xyz));
+  return vec4<f32>(col, 1.0);
+}
+
+// ---------------- 道路 ----------------
+struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32> };
+@vertex
+fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec4<u32>) -> ROut {
+  var o: ROut; o.w = p; o.c = c.rgb;
+  let year = G.sky_col.w;
+  o.pos = G.view_proj * vec4<f32>(p, 1.0);
+  if (f32(m.y) > 0.5 && year < 1900.0 + f32(m.y)) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  return o;
+}
+@fragment
+fn fs_road(i: ROut) -> @location(0) vec4<f32> {
+  var col = light(to_lin(i.c), vec3<f32>(0.0, 1.0, 0.0));
+  let night = G.sun_dir.w;
+  col = mix(col, col * 0.3 + vec3<f32>(0.03, 0.022, 0.01), night);
+  col = mix(col, vec3<f32>(0.85), G.fog_col.w * 0.5);
+  col = fog(col, length(i.w - G.cam_pos.xyz));
+  return vec4<f32>(col, 1.0);
+}
+
+// ---------------- 地標／車站／高架橋網格 ----------------
+struct MOut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32> };
+@vertex
+fn vs_mesh(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>, @location(3) gy: vec2<u32>) -> MOut {
+  var o: MOut; o.w = p; o.n = n; o.c = c;
+  o.pos = G.view_proj * vec4<f32>(p, 1.0);
+  let vis = group_vis(gy.x);
+  if (vis < 0.5 || (f32(gy.y) > 0.5 && G.sky_col.w < f32(gy.y))) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  return o;
+}
+@fragment
+fn fs_mesh(i: MOut) -> @location(0) vec4<f32> {
+  let n = normalize(i.n);
+  let base = to_lin(i.c.rgb);
+  var col = light(base, n);
+  let night = G.sun_dir.w;
+  col = mix(col, col * 0.25, night) + base * i.c.a * (0.3 + night * 1.6);
+  col = fog(col, length(i.w - G.cam_pos.xyz));
+  return vec4<f32>(col, 1.0);
+}
+
+// ---------------- 軌道路線帶（固定螢幕寬度＋白框，地下段淡色虛線） ----------------
+struct LOut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32>, @location(1) sdk: vec4<f32> };
+@vertex
+fn vs_line(@location(0) p: vec3<f32>, @location(1) perp: vec2<f32>, @location(2) c: vec4<f32>, @location(3) sdkg: vec4<f32>) -> LOut {
+  var o: LOut;
+  let g = u32(sdkg.w);
+  let vis = group_vis(g);
+  let wpx = select(6.0, 8.0, G.ground_col.w > 0.5 && G.fog_col.w > 0.5);
+  let w = max(5.0, wpx * G.cs2b.w) * 0.5;
+  let q = p + vec3<f32>(perp.x, 0.0, perp.y) * sdkg.x * w;
+  o.pos = G.view_proj * vec4<f32>(q, 1.0);
+  o.pos.z = o.pos.z - 0.0004 * o.pos.w;
+  o.c = vec4<f32>(c.rgb, vis);
+  o.sdk = vec4<f32>(sdkg.x, sdkg.y, sdkg.z, wpx);
+  if (vis < 0.1 || G.sky_col.w < c.a * 255.0 + 1900.0) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  return o;
+}
+@fragment
+fn fs_line(i: LOut) -> @location(0) vec4<f32> {
+  let a = abs(i.sdk.x); let edge = 1.0 - 1.6 / max(i.sdk.w, 3.0);
+  let night = G.sun_dir.w;
+  let casing = mix(vec3<f32>(1.0), vec3<f32>(0.06, 0.09, 0.13), night);
+  var c = to_lin(i.c.rgb) * mix(1.0, 1.3, night);
+  if (i.sdk.z > 0.5) {
+    c = mix(c, to_lin(casing), 0.3);
+    if (a < 0.22 && fract(i.sdk.y / max(24.0, G.cs2b.w * 12.0)) < 0.5) { c = to_lin(casing); }
+  }
+  if (a > edge) { c = to_lin(casing); }
+  let focus = i.c.a;
+  c = mix(mix(to_lin(casing), vec3<f32>(0.5), 0.4), c, clamp(focus, 0.0, 1.0));
+  return vec4<f32>(c, 1.0);
+}

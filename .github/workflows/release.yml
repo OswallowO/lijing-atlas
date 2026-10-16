@@ -1,0 +1,30 @@
+# 推送 v* 標籤時：在 Windows 上編譯、打包 lijing-windows.zip 並發佈到 GitHub Releases。
+# 程式啟動時會查詢最新 Release，自動下載更新。
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/lijing | Out-Null
+          Copy-Item target/release/lijing.exe dist/lijing/
+          Copy-Item -Recurse data dist/lijing/data
+          Copy-Item README.md dist/lijing/使用說明.md
+          Compress-Archive -Path dist/lijing/* -DestinationPath lijing-windows.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: lijing-windows.zip
+          generate_release_notes: true
