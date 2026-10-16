@@ -1,8 +1,10 @@
-# 推送 v* 標籤時：在 Windows 上編譯、打包 lijing-windows.zip 並發佈到 GitHub Releases。
+# main 有推送（或推送 v* 標籤）時：在 Windows 上編譯、打包 lijing-windows.zip，
+# 以 Cargo.toml 的版本號建立標籤並發佈到 GitHub Releases（版本已存在則略過）。
 # 程式啟動時會查詢最新 Release，自動下載更新。
 name: release
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 permissions:
@@ -12,11 +14,24 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Version
+        id: ver
+        shell: bash
+        run: |
+          v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          echo "tag=v$v" >> $GITHUB_OUTPUT
+          if gh release view "v$v" >/dev/null 2>&1; then echo "exists=1" >> $GITHUB_OUTPUT; else echo "exists=0" >> $GITHUB_OUTPUT; fi
+        env:
+          GH_TOKEN: ${{ github.token }}
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.ver.outputs.exists == '0'
       - uses: Swatinem/rust-cache@v2
+        if: steps.ver.outputs.exists == '0'
       - name: Build
+        if: steps.ver.outputs.exists == '0'
         run: cargo build --release
       - name: Package
+        if: steps.ver.outputs.exists == '0'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/lijing | Out-Null
@@ -25,6 +40,9 @@ jobs:
           Copy-Item README.md dist/lijing/使用說明.md
           Compress-Archive -Path dist/lijing/* -DestinationPath lijing-windows.zip
       - uses: softprops/action-gh-release@v2
+        if: steps.ver.outputs.exists == '0'
         with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: 麗京城市圖鑑 ${{ steps.ver.outputs.tag }}
           files: lijing-windows.zip
           generate_release_notes: true
