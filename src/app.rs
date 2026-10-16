@@ -105,7 +105,14 @@ pub struct World {
     interior: Option<InteriorView>,
     orbit: bool,
     layers: [bool; 4], // 地標、地名、分區、熱區
+    outlines: Vec<Outline>,
+    bounds: bool,            // 顯示分區邊界
+    bound_sel: Option<usize>, // 只顯示某一分區
+    zone_line: bool,         // 顯示特區範圍
 }
+
+/// 地面外框（分區、特區、地標基地）
+struct Outline { pts: Vec<Vec3>, color: Color32, kind: u8, idx: usize, key: String }
 
 enum Load { Loading(mpsc::Receiver<Result<Data, String>>, Arc<Mutex<(f32, String)>>), Ready(Box<World>), Failed(String) }
 
@@ -158,10 +165,12 @@ impl World {
             r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), focus_line: None, sel: Sel::None,
             labels: vec![], lms, keys: HashSet::new(), left_tilt: false, playing: false, play_t: 0.0, scale: 1.0, auto_res: true, fps: 0.0, fps_acc: (0.0, 0), frame_ms: 0.0,
             search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, tl_open: true,
-            cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], d,
+            cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], outlines: vec![], bounds: false, bound_sel: None, zone_line: false, d,
         };
         w.build_labels();
+        w.build_outlines();
         w.set_time(Tod::Day);
+        if std::env::var("LIJING_BOUNDS").is_ok() { w.bounds = true; w.zone_line = true; }
         // 測試用：LIJING_VIEW=經度,緯度,距離,俯角,方位,年份；LIJING_INTERIOR=種類
         if let Ok(v) = std::env::var("LIJING_VIEW") {
             let a: Vec<f64> = v.split(',').filter_map(|x| x.parse().ok()).collect();
@@ -220,6 +229,78 @@ impl World {
             out.push(Label { p: wp(lon, lat, 0.0), text: format!("▲ {nm} {e:.0} m"), kind: LKind::Peak, pri: 2, max_d: 25000.0, min_d: 0.0, color: Color32::from_rgb(0x6b, 0x4a, 0x26), glyph: None, idx: 0, year: 0, lines: vec![] });
         }
         self.labels = out;
+    }
+
+    fn build_outlines(&mut self) {
+        let d = &self.d;
+        // 沿多邊形邊每 40 m 取樣並貼地
+        let ring = |r: &Value| -> Vec<Vec3> {
+            let pts: Vec<(f64, f64)> = r.as_array().cloned().unwrap_or_default().iter().map(|p| d.geo.to_local(p[0].as_f64().unwrap_or(0.0), p[1].as_f64().unwrap_or(0.0))).collect();
+            let mut out = vec![];
+            for i in 0..pts.len() {
+                let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+                let n = ((((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt() / 40.0).ceil() as usize).max(1);
+                for k in 0..n {
+                    let t = k as f64 / n as f64;
+                    let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
+                    out.push(Vec3::new(x as f32, d.hg.at(x, y).max(0.0) + 4.0, -y as f32));
+                }
+            }
+            if let Some(f) = out.first().cloned() { out.push(f); }
+            out
+        };
+        let mut v = vec![];
+        for (i, dd) in d.story["DISTRICTS"].as_array().cloned().unwrap_or_default().iter().enumerate() {
+            let col = hex32(&s(&dd["color"]));
+            v.push(Outline { pts: ring(&dd["poly"]), color: col, kind: 0, idx: i, key: s(&dd["id"]) });
+            for e in dd["extra"].as_array().cloned().unwrap_or_default() { v.push(Outline { pts: ring(&e), color: col, kind: 0, idx: i, key: s(&dd["id"]) }); }
+        }
+        for z in d.zone.as_array().cloned().unwrap_or_default() { v.push(Outline { pts: ring(&z), color: Color32::from_rgb(0xc2, 0x3b, 0x3b), kind: 1, idx: 0, key: "zone".into() }); }
+        if let Some(m) = d.sites.as_object() {
+            for (k, r) in m { v.push(Outline { pts: ring(r), color: Color32::from_rgb(0x4a, 0x55, 0x60), kind: 2, idx: self.lms.iter().position(|l| &l.id == k).unwrap_or(usize::MAX), key: k.clone() }); }
+        }
+        self.outlines = v;
+    }
+
+    fn draw_outlines(&self, p: &egui::Painter, rect: Rect) {
+        let story = self.year >= 2016;
+        let sel_lm = if let Sel::Landmark(i) = self.sel { Some(i) } else { None };
+        for o in &self.outlines {
+            let (w, dash) = match o.kind {
+                0 => {
+                    if !story || !(self.bounds || self.bound_sel.is_some()) { continue; }
+                    if let Some(b) = self.bound_sel { if b != o.idx { continue; } }
+                    (if self.bound_sel.is_some() { 3.2 } else { 2.2 }, false)
+                }
+                1 => { if !self.zone_line || !story { continue; } (2.4, true) }
+                _ => {
+                    let l = self.lms.get(o.idx);
+                    let built = l.map(|l| l.built <= self.year && story).unwrap_or(false);
+                    let sel = sel_lm == Some(o.idx);
+                    if !built || !self.layers[0] || !(sel || self.cam.dist < 2600.0) { continue; }
+                    (if sel { 2.4 } else { 1.3 }, true)
+                }
+            };
+            // 投影；鏡頭後方的點切斷折線
+            let mut runs: Vec<Vec<Pos2>> = vec![vec![]];
+            for q in &o.pts {
+                match self.cam.project(*q) {
+                    Some(sp) => runs.last_mut().unwrap().push(rect.min + Vec2::new(sp.x, sp.y)),
+                    None => if !runs.last().unwrap().is_empty() { runs.push(vec![]); },
+                }
+            }
+            for r in runs.iter().filter(|r| r.len() > 1) {
+                if !r.iter().any(|q| rect.expand(200.0).contains(*q)) { continue; }
+                let halo = Stroke::new(w + 2.5, Color32::from_rgba_unmultiplied(255, 255, 255, 150));
+                if dash {
+                    p.extend(egui::Shape::dashed_line(r, halo, 9.0, 6.0));
+                    p.extend(egui::Shape::dashed_line(r, Stroke::new(w, o.color), 9.0, 6.0));
+                } else {
+                    p.add(egui::Shape::line(r.clone(), halo));
+                    p.add(egui::Shape::line(r.clone(), Stroke::new(w, o.color)));
+                }
+            }
+        }
     }
 
     fn line_on(&self, id: &str) -> bool {
@@ -299,7 +380,6 @@ impl World {
         g.cs2b = [(21.0 * self.cs2.2 / 14336.0).round(), if self.mode == Mode::Cs2 { 1.0 } else { 0.0 }, if self.mode == Mode::Transit && self.layers[3] { 1.0 } else { 0.0 }, c.meters_per_pixel()];
         g.tex[3] = c.vh;
         g.groups = vis;
-        self.r.use_pre_ground = self.year < 2016;
     }
 
     /// 繪製 3D 場景到離屏貼圖並交給 egui 顯示。
@@ -523,6 +603,7 @@ impl World {
         if let Some(id) = self.tex {
             painter.image(id, full, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         }
+        self.draw_outlines(&painter, full);
         self.draw_labels(&painter, full);
         self.draw_measure(&painter, full);
         let _ = moving;
@@ -717,6 +798,7 @@ impl World {
                         if seg(ui, n, self.tod == t) { self.set_time(t); }
                     }
                     ui.separator();
+                    if seg(ui, "分區邊界", self.bounds || self.bound_sel.is_some()) { if self.bound_sel.is_some() { self.bound_sel = None; self.bounds = false; } else { self.bounds = !self.bounds; } }
                     if seg(ui, if self.left_tilt { "左鍵：轉視角" } else { "左鍵：平移" }, self.left_tilt) { self.left_tilt = !self.left_tilt; }
                     if seg(ui, &format!("解析度 {:.0}%{}", self.scale * 100.0, if self.auto_res { "（自動）" } else { "" }), false) {
                         if self.auto_res { self.auto_res = false; self.scale = 1.0; } else if self.scale >= 1.0 { self.scale = 0.7; } else { self.auto_res = true; }
@@ -862,7 +944,7 @@ impl World {
                 let (mny, mxy) = (ys.iter().cloned().fold(f64::MAX, f64::min), ys.iter().cloned().fold(f64::MIN, f64::max));
                 let span = ((mxx - mnx) * 100000.0).max((mxy - mny) * 110000.0) as f32;
                 self.fly_ll((mnx + mxx) / 2.0, (mny + mxy) / 2.0, span * 1.4, Some(50.0));
-                let _ = i;
+                self.bound_sel = Some(i);
             }
         }
         ui.add_space(8.0);
@@ -871,7 +953,10 @@ impl World {
             ui.checkbox(&mut self.layers[0], "地標");
             ui.checkbox(&mut self.layers[1], "地名");
             ui.checkbox(&mut self.layers[2], "功能分區");
+            if ui.checkbox(&mut self.bounds, "分區邊界").changed() { self.bound_sel = None; }
+            ui.checkbox(&mut self.zone_line, "特區範圍");
         });
+        if self.bound_sel.is_some() && ui.button("顯示全部分區").clicked() { self.bound_sel = None; self.bounds = true; }
         ui.add_space(8.0);
         eyebrow(ui, "軌道路線（點選開啟，未開啟時為純地圖）");
         self.line_chips(ui);

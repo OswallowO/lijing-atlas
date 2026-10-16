@@ -25,6 +25,8 @@ struct Globals {
 @group(0) @binding(3) var c_tex: texture_2d<f32>;
 @group(0) @binding(4) var lin_s: sampler;
 @group(0) @binding(5) var heat_tex: texture_2d<f32>;
+@group(0) @binding(6) var gp_tex: texture_2d<f32>;   // 戰前地表
+@group(0) @binding(7) var dev_tex: texture_2d<f32>;  // r 揭露日/18、g 填海日/18、b 舊海岸距離場
 
 fn light(base: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
   let d = max(dot(n, G.sun_dir.xyz), 0.0);
@@ -76,7 +78,13 @@ struct TOut {
   @location(3) h: f32,
 };
 fn H(uv: vec2<f32>) -> f32 { return textureSampleLevel(h_tex, lin_s, uv, 0.0).r; }
-fn SD(uv: vec2<f32>) -> f32 { return (textureSampleLevel(c_tex, lin_s, uv, 0.0).r * 255.0 - 128.0) * 2.0; }
+fn SD(uv: vec2<f32>) -> f32 {
+  // 填海完成前改用舊海岸線
+  let dv = textureSampleLevel(dev_tex, lin_s, uv, 0.0);
+  let now = (textureSampleLevel(c_tex, lin_s, uv, 0.0).r * 255.0 - 128.0) * 2.0;
+  let old = (dv.b * 255.0 - 128.0) * 2.0;
+  return select(now, old, dv.g > 0.002 && G.day.x < dv.g * 255.0 * 18.0);
+}
 
 @vertex
 fn vs_terrain(@location(0) p: vec3<f32>, @location(1) tile: vec3<f32>) -> TOut {
@@ -107,7 +115,13 @@ fn hypso(h: f32) -> vec3<f32> {
 }
 @fragment
 fn fs_terrain(i: TOut) -> @location(0) vec4<f32> {
-  var base = textureSample(g_tex, lin_s, i.uv).rgb;
+  // 逐日地表：揭露日之前顯示戰前地表（道路、公園、都市地坪、填海區都依日期出現）
+  let g25 = textureSample(g_tex, lin_s, i.uv).rgb;
+  let gpre = textureSample(gp_tex, lin_s, i.uv).rgb;
+  let dv = textureSample(dev_tex, lin_s, i.uv);
+  let rd = dv.r * 255.0 * 18.0;
+  let k = select(1.0, clamp((G.day.x - rd) / 40.0 + 0.5, 0.0, 1.0), dv.r > 0.002);
+  var base = mix(gpre, g25, k);
   let n = normalize(i.n);
   let minor = grid_line(i.h / 10.0, 1.0) * step(0.5, i.h);
   let major = grid_line(i.h / 50.0, 1.3) * step(0.5, i.h);
@@ -147,7 +161,7 @@ fn fs_water(i: WOut) -> @location(0) vec4<f32> {
   var h = -40.0; var sd = -256.0;
   if (!outside) {
     h = min(textureSampleLevel(h_tex, lin_s, uv, 0.0).r, 0.0);
-    sd = (textureSampleLevel(c_tex, lin_s, uv, 0.0).r * 255.0 - 128.0) * 2.0;
+    sd = SD(uv);
   }
   let aa = max(fwidth(sd), 0.5);
   let cf = cs2_factors(i.w.x, i.w.z, false);
@@ -196,32 +210,66 @@ fn vs_bld(@location(0) p: vec3<f32>, @location(1) n: vec4<f32>, @location(2) uv:
   return o;
 }
 @fragment
+fn pal_res(k: u32) -> vec3<f32> {
+  // 住宅／公共外牆色票（線性空間前的 sRGB）
+  var c = array<vec3<f32>, 8>(vec3<f32>(0.96, 0.95, 0.92), vec3<f32>(0.93, 0.89, 0.80), vec3<f32>(0.86, 0.80, 0.70), vec3<f32>(0.82, 0.83, 0.84),
+    vec3<f32>(0.88, 0.74, 0.64), vec3<f32>(0.80, 0.85, 0.78), vec3<f32>(0.76, 0.82, 0.88), vec3<f32>(0.90, 0.88, 0.86));
+  return to_lin(c[k % 8u]);
+}
+fn pal_glass(k: u32) -> vec3<f32> {
+  var c = array<vec3<f32>, 6>(vec3<f32>(0.50, 0.64, 0.76), vec3<f32>(0.46, 0.66, 0.66), vec3<f32>(0.62, 0.58, 0.50), vec3<f32>(0.70, 0.74, 0.78), vec3<f32>(0.44, 0.56, 0.70), vec3<f32>(0.52, 0.62, 0.56));
+  return to_lin(c[k % 6u]);
+}
+fn pal_roof(k: u32, ind: bool) -> vec3<f32> {
+  var c = array<vec3<f32>, 6>(vec3<f32>(0.62, 0.32, 0.24), vec3<f32>(0.30, 0.31, 0.33), vec3<f32>(0.36, 0.44, 0.52), vec3<f32>(0.48, 0.36, 0.28), vec3<f32>(0.42, 0.48, 0.42), vec3<f32>(0.70, 0.42, 0.30));
+  var m = array<vec3<f32>, 3>(vec3<f32>(0.62, 0.66, 0.70), vec3<f32>(0.44, 0.55, 0.66), vec3<f32>(0.70, 0.70, 0.68));
+  if (ind) { return to_lin(m[k % 3u]); }
+  return to_lin(c[k % 6u]);
+}
 fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
-  let ti = i32(i.m.x); let cyv = f32(i.m.y); let va = f32(i.m.z); let roof = i.m.w == 1u;
+  let ti = i32(i.m.x); let cyv = f32(i.m.y); let roof = i.m.w == 1u;
+  let style = i.m.z & 15u; let pal = i.m.z >> 4u; let va = f32(style);
   let year = G.sky_col.w; let night = G.sun_dir.w;
   var base = G.type_col[clamp(ti, 0, 11)].rgb;
-  base = base * (0.95 + 0.05 * (va % 4.0) / 3.0);
+  let resi = ti == 1 || ti == 2 || ti == 3 || ti == 4 || ti == 5 || ti == 7 || ti == 10;
+  let officeish = ti == 0 || ti == 8;
+  if (resi) { base = mix(base, pal_res(pal), 0.55); }
+  var glass = G.glass.rgb;
+  if (officeish) { glass = mix(glass, pal_glass(pal), 0.6); base = mix(base, pal_res(pal + 3u), 0.25); }
   if (cyv > 0.5 && year < 1900.0 + cyv) { base = G.conc.rgb; }
   let n = normalize(i.n);
   var emis = vec3<f32>(0.0);
-  var fh = 3.2; if (ti == 0 || ti == 8) { fh = 4.0; }
-  var cw = 3.2; if (ti == 8) { cw = 2.4; } else if (ti == 3) { cw = 4.0; }
+  var fh = 3.2; if (officeish) { fh = 4.0; }
+  var cw = 3.2; if (ti == 8) { cw = 2.4; } else if (ti == 3) { cw = 4.0; } else if (style % 4u == 2u && resi) { cw = 4.4; }
   let cx = i.uv.x / cw;
   let aa = clamp(1.6 - max(fwidth(cx), fwidth(i.uv.y / fh)) * 2.2, 0.0, 1.0);
   let fl = floor(i.uv.y / fh); let fy = fract(i.uv.y / fh);
   let fx = fract(cx);
-  let wall = abs(n.y) < 0.5 && ti != 9 && i.m.w != 2u;
+  let wall = abs(n.y) < 0.5 && ti != 9 && i.m.w != 2u && i.m.w != 3u && i.m.w != 4u;
   if (wall) {
-    // 窗：玻璃帶＋直櫺；一樓為店面（較高的玻璃）；每 5 層一道設備層
-    var win = step(0.28, fy) * step(fy, 0.86) * step(0.14, fx) * step(fx, 0.86) * step(1.0, fl);
+    // 立面樣式庫：辦公（窗洞／水平帶窗／帷幕／垂直鰭片）、住宅（窗洞／陽台帶／雙併窗／直條窗）
+    let pat = style % 4u;
+    var win = step(0.28, fy) * step(fy, 0.86) * step(0.14, fx) * step(fx, 0.86);
+    var dark = 0.0;
+    if (officeish) {
+      if (pat == 1u) { win = step(0.22, fy) * step(fy, 0.88); }
+      else if (pat == 2u) { win = 1.0 - max(step(0.95, fx), step(0.93, fy)) * 0.85; }
+      else if (pat == 3u) { win = step(0.25, fx) * step(fx, 0.75) * step(0.06, fy); dark = (1.0 - step(0.12, fx)) * 0.25; }
+    } else if (resi && ti != 3 && ti != 10) {
+      if (pat == 1u) { win = step(0.30, fy) * step(fy, 0.84) * step(0.08, fx) * step(fx, 0.92); dark = step(fy, 0.16) * 0.0 + (1.0 - step(0.10, fy)) * 0.35; }
+      else if (pat == 2u) { win = step(0.30, fy) * step(fy, 0.82) * (step(0.10, fx) * step(fx, 0.44) + step(0.56, fx) * step(fx, 0.90)); }
+      else if (pat == 3u) { win = step(0.06, fy) * step(fx, 0.30) * step(0.10, fx); }
+    }
+    win = win * step(1.0, fl);
     let shop = (1.0 - step(1.0, fl)) * step(0.12, fy) * step(fy, 0.92) * step(0.06, fx) * step(fx, 0.94) * select(0.0, 1.0, ti == 4 || ti == 1 || ti == 0 || ti == 8);
-    let band = select(0.0, 1.0, (fl % 5.0) == 4.0 && ti != 3);
+    let band = select(0.0, 1.0, (fl % 5.0) == 4.0 && ti != 3 && pat != 2u);
     win = max(win * (1.0 - band * 0.8), shop);
     win = mix(0.3 * step(1.0, fl + 0.5), win, aa);
     var glassy = 0.22; if (ti == 8) { glassy = 0.55; } else if (ti == 0 || ti == 1) { glassy = 0.35; }
+    if (officeish && pat == 2u) { glassy = 0.7; }
     if (ti == 10 || ti == 11) { glassy = 0.12; }
-    base = mix(base, G.glass.rgb, win * glassy);
-    base = base * (1.0 - band * 0.12 * aa);
+    base = mix(base, glass, win * glassy);
+    base = base * (1.0 - band * 0.12 * aa) * (1.0 - dark * aa);
     var lit = step(0.52, hash3(vec3<f32>(floor(cx), fl, floor(i.w.x * 0.02) + floor(i.w.z * 0.02))));
     let wc = mix(vec3<f32>(1.0, 0.6, 0.2), vec3<f32>(0.4, 0.7, 1.0), step(0.7, hash3(vec3<f32>(fl, floor(cx) * 1.3, va))));
     lit = mix(0.3, lit, aa);
@@ -229,6 +277,12 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     base = base * (0.78 + 0.22 * clamp(i.uv.y / 8.0, 0.0, 1.0));
   } else if (roof) {
     base = base * 0.9;
+  } else if (i.m.w == 3u) {
+    base = pal_roof(pal, ti == 6);                     // 斜屋頂瓦／金屬屋面
+    if (ti == 6) { base = base * (0.9 + 0.1 * step(0.5, fract(i.w.x * 0.5 + i.w.z * 0.5))); }
+  } else if (i.m.w == 4u) {
+    base = glass * 1.1;                                 // 冠頂玻璃、天窗
+    emis = vec3<f32>(0.9, 0.95, 1.0) * night * 0.5;
   } else if (i.m.w == 2u) {
     base = mix(base, G.conc.rgb, 0.35);   // 女兒牆、屋頂機房
   }

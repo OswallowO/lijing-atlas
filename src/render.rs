@@ -87,8 +87,6 @@ pub struct Renderer {
     gbuf: wgpu::Buffer,
     pub bgl: wgpu::BindGroupLayout,
     pub bg: wgpu::BindGroup,
-    bg_pre: wgpu::BindGroup,
-    pub use_pre_ground: bool,
     p_terrain: wgpu::RenderPipeline,
     p_water: wgpu::RenderPipeline,
     p_bld: wgpu::RenderPipeline,
@@ -112,7 +110,7 @@ pub struct Renderer {
     pub tris: u64,
     pub calls: u32,
     pub sets_on: [bool; 3],
-    aux: (wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::Sampler, wgpu::TextureView),
+    aux: (wgpu::TextureView, wgpu::TextureView, wgpu::TextureView, wgpu::Sampler, wgpu::TextureView, wgpu::TextureView, wgpu::TextureView),
 }
 
 fn tex2d(device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, fmt: wgpu::TextureFormat, bpp: u32, levels: &[Vec<u8>]) -> wgpu::Texture {
@@ -208,6 +206,7 @@ impl Renderer {
         let c_tex = tex2d(device, queue, d.coast.0 as u32, d.coast.1 as u32, wgpu::TextureFormat::R8Unorm, 1, &[d.coast.2.clone()]);
         let g_tex = tex2d(device, queue, d.ground.width(), d.ground.height(), wgpu::TextureFormat::Rgba8UnormSrgb, 4, &mips(&d.ground));
         let gp_tex = tex2d(device, queue, d.ground_pre.width(), d.ground_pre.height(), wgpu::TextureFormat::Rgba8UnormSrgb, 4, &mips(&d.ground_pre));
+        let dev_tex = tex2d(device, queue, d.ground_dev.width(), d.ground_dev.height(), wgpu::TextureFormat::Rgba8Unorm, 4, &[d.ground_dev.as_raw().clone()]);
         let heat = crate::heat::build(d);
         let heat_tex = tex2d(device, queue, heat.0, heat.0, wgpu::TextureFormat::R8Unorm, 1, &[heat.1.clone()]);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -242,11 +241,15 @@ impl Renderer {
                 tex_entry(3),
                 wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::VERTEX_FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
                 tex_entry(5),
+                tex_entry(6),
+                tex_entry(7),
             ],
         });
         let hv = h_tex.create_view(&Default::default());
         let cv = c_tex.create_view(&Default::default());
         let hev = heat_tex.create_view(&Default::default());
+        let gpv = gp_tex.create_view(&Default::default());
+        let dvv = dev_tex.create_view(&Default::default());
         let mkbg = |gt: &wgpu::Texture| {
             let gv = gt.create_view(&Default::default());
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -259,12 +262,13 @@ impl Renderer {
                     wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&cv) },
                     wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&sampler) },
                     wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&hev) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&gpv) },
+                    wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&dvv) },
                 ],
             })
         };
-        let aux = (hv.clone(), g_tex.create_view(&Default::default()), cv.clone(), sampler.clone(), hev.clone());
+        let aux = (hv.clone(), g_tex.create_view(&Default::default()), cv.clone(), sampler.clone(), hev.clone(), gpv.clone(), dvv.clone());
         let bg = mkbg(&g_tex);
-        let bg_pre = mkbg(&gp_tex);
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("shaders"), source: wgpu::ShaderSource::Wgsl(include_str!("shaders.wgsl").into()) });
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
         let mk = |vs: &str, fs: &str, bufs: &[Option<wgpu::VertexBufferLayout>], blend: Option<wgpu::BlendState>, depth_write: bool, bias: i32| {
@@ -345,7 +349,7 @@ impl Renderer {
             }
         };
         Renderer {
-            globals, gbuf, bgl, bg, bg_pre, use_pre_ground: false, p_terrain, p_water, p_bld, p_road, p_mesh, p_line, grids, inst, inst_n: vec![0; LODS.len()], tiles, water,
+            globals, gbuf, bgl, bg, p_terrain, p_water, p_bld, p_road, p_mesh, p_line, grids, inst, inst_n: vec![0; LODS.len()], tiles, water,
             scene_n: sv.len() as u32, scene_vb, lines, chunks, tx, rx, pending: 0, frame_no: 0, quality: 1.0, tris: 0, calls: 0, sets_on: [true, true, true], aux,
         }
     }
@@ -436,7 +440,7 @@ impl Renderer {
         });
         let mut tris = 0u64;
         let mut calls = 0u32;
-        rp.set_bind_group(0, if self.use_pre_ground { &self.bg_pre } else { &self.bg }, &[]);
+        rp.set_bind_group(0, &self.bg, &[]);
         // 地形
         rp.set_pipeline(&self.p_terrain);
         for (i, (v, ib, n)) in self.grids.iter().enumerate() {
@@ -514,6 +518,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&a.2) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&a.3) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&a.4) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&a.5) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&a.6) },
             ],
         });
         (buf, bg)

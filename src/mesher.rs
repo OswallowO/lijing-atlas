@@ -171,6 +171,111 @@ fn earcut(px: &[f32], py: &[f32]) -> Vec<u32> {
     idx
 }
 
+/// 網格輸出輔助：牆、頂面、任意四邊形／三角形（法線朝外／朝上）
+struct Emit<'a> { v: &'a mut Vec<BVertex>, i: &'a mut Vec<u32>, meta: [u8; 4], days: [u16; 4], z0: f32, g: f32, cx: f32, cy: f32 }
+fn nrm8(n: [f32; 3]) -> [i8; 4] {
+    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt().max(1e-6);
+    [(n[0] / l * 127.0) as i8, (n[1] / l * 127.0) as i8, (n[2] / l * 127.0) as i8, 0]
+}
+impl<'a> Emit<'a> {
+    fn walls(&mut self, xs: &[f32], ys: &[f32], za: f32, zb: f32, flag: u8) {
+        let nv = xs.len();
+        let mut perim = 0.0;
+        for k in 0..nv {
+            let k2 = (k + 1) % nv;
+            let (ax, ay, bx, by) = (xs[k], ys[k], xs[k2], ys[k2]);
+            let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+            if l < 0.05 { continue; }
+            let nn = [((by - ay) / l * 127.0) as i8, 0, ((bx - ax) / l * 127.0) as i8, 0];
+            let base = self.v.len() as u32;
+            let m = [self.meta[0], self.meta[1], self.meta[2], flag];
+            for (x, yy, z, u) in [(ax, ay, za, perim), (bx, by, za, perim + l), (bx, by, zb, perim + l), (ax, ay, zb, perim)] {
+                self.v.push(BVertex { pos: [x, z, -yy], nrm: nn, uv: [u, z - self.g], meta: m, days: self.days, base: self.z0 });
+            }
+            self.i.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            perim += l;
+        }
+    }
+    fn cap(&mut self, xs: &[f32], ys: &[f32], z: f32, flag: u8) {
+        let tri = earcut(xs, ys);
+        let base = self.v.len() as u32;
+        for k in 0..xs.len() {
+            self.v.push(BVertex { pos: [xs[k], z, -ys[k]], nrm: [0, 127, 0, 0], uv: [0.0, -1.0], meta: [self.meta[0], self.meta[1], self.meta[2], flag], days: self.days, base: self.z0 });
+        }
+        for c in tri.chunks(3) { self.i.extend_from_slice(&[base + c[0], base + c[2], base + c[1]]); }
+    }
+    /// 多邊形面（點為 (x, y平面, z高)）；法線由叉積決定，屋面朝上、立面朝外
+    fn face(&mut self, p: &[[f32; 3]], flag: u8, wall_uv: bool) {
+        let w = |q: [f32; 3]| [q[0], q[2], -q[1]];
+        let (a, b, c) = (w(p[0]), w(p[1]), w(p[p.len() - 1]));
+        let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+        let mut n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+        let mx = p.iter().map(|q| q[0]).sum::<f32>() / p.len() as f32 - self.cx;
+        let my = p.iter().map(|q| q[1]).sum::<f32>() / p.len() as f32 - self.cy;
+        let out = n[0] * mx + n[2] * (-my);
+        if n[1] < -1e-4 || (n[1].abs() < 1e-3 && out < 0.0) { n = [-n[0], -n[1], -n[2]]; }
+        let nn = nrm8(n);
+        let base = self.v.len() as u32;
+        let mut perim = 0.0;
+        for (k, q) in p.iter().enumerate() {
+            if k > 0 { perim += ((q[0] - p[k - 1][0]).powi(2) + (q[1] - p[k - 1][1]).powi(2)).sqrt(); }
+            let uv = if wall_uv { [perim, q[2] - self.g] } else { [0.0, -1.0] };
+            self.v.push(BVertex { pos: w(*q), nrm: nn, uv, meta: [self.meta[0], self.meta[1], self.meta[2], flag], days: self.days, base: self.z0 });
+        }
+        for k in 1..p.len() as u32 - 1 { self.i.extend_from_slice(&[base, base + k, base + k + 1]); }
+    }
+    fn bx(&mut self, cx: f32, cy: f32, ax: (f32, f32), hw: f32, hd: f32, za: f32, zb: f32, flag: u8) {
+        let bxv = (-ax.1, ax.0);
+        let q: Vec<(f32, f32)> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|&(a, b)| (cx + ax.0 * hw * a + bxv.0 * hd * b, cy + ax.1 * hw * a + bxv.1 * hd * b)).collect();
+        let xs: Vec<f32> = q.iter().map(|p| p.0).collect(); let ys: Vec<f32> = q.iter().map(|p| p.1).collect();
+        self.walls(&xs, &ys, za, zb, flag);
+        self.cap(&xs, &ys, zb, if flag == 4 { 4 } else { 1 });
+    }
+}
+
+/// 最小外接矩形：中心、長軸單位向量、半長、半寬、填滿率
+fn obb(xs: &[f32], ys: &[f32], area: f32) -> (f32, f32, (f32, f32), f32, f32, f32) {
+    let n = xs.len();
+    let mut best = (f32::MAX, 0.0f32, 0.0f32, (1.0f32, 0.0f32), 0.0f32, 0.0f32);
+    for k in 0..n {
+        let k2 = (k + 1) % n;
+        let (dx, dy) = (xs[k2] - xs[k], ys[k2] - ys[k]);
+        let l = (dx * dx + dy * dy).sqrt();
+        if l < 0.5 { continue; }
+        let (ux, uy) = (dx / l, dy / l);
+        let (mut a0, mut a1, mut b0, mut b1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+        for j in 0..n {
+            let a = xs[j] * ux + ys[j] * uy; let b = -xs[j] * uy + ys[j] * ux;
+            a0 = a0.min(a); a1 = a1.max(a); b0 = b0.min(b); b1 = b1.max(b);
+        }
+        let ar = (a1 - a0) * (b1 - b0);
+        if ar < best.0 {
+            let (ca, cb) = ((a0 + a1) / 2.0, (b0 + b1) / 2.0);
+            let (cx, cy) = (ca * ux - cb * uy, ca * uy + cb * ux);
+            let (hw, hd) = ((a1 - a0) / 2.0, (b1 - b0) / 2.0);
+            best = if hw >= hd { (ar, cx, cy, (ux, uy), hw, hd) } else { (ar, cx, cy, (-uy, ux), hd, hw) };
+        }
+    }
+    (best.1, best.2, best.3, best.4, best.5, (area / best.0.max(1e-3)).min(1.0))
+}
+/// 沿外接矩形軸向內縮 d 公尺（任意形狀）
+fn inset(xs: &[f32], ys: &[f32], o: &(f32, f32, (f32, f32), f32, f32, f32), da: f32, db: f32) -> (Vec<f32>, Vec<f32>) {
+    let (cx, cy, (ux, uy), hw, hd, _) = *o;
+    let (sa, sb) = (((hw - da) / hw).max(0.2), ((hd - db) / hd).max(0.2));
+    let mut ox = vec![]; let mut oy = vec![];
+    for k in 0..xs.len() {
+        let (x, y) = (xs[k] - cx, ys[k] - cy);
+        let a = (x * ux + y * uy) * sa; let b = (-x * uy + y * ux) * sb;
+        ox.push(cx + a * ux - b * uy); oy.push(cy + a * uy + b * ux);
+    }
+    (ox, oy)
+}
+fn hash2(x: f32, y: f32) -> u32 {
+    let mut h = (x.floor() as i32 as u32).wrapping_mul(0x9E3779B1) ^ (y.floor() as i32 as u32).wrapping_mul(0x85EBCA77);
+    h ^= h >> 15; h = h.wrapping_mul(0x2C1B3C6D); h ^= h >> 12; h
+}
+
 fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (MeshData, MeshData, ChunkInfo) {
     let mut parts: [(Vec<BVertex>, Vec<u32>); 2] = [(vec![], vec![]), (vec![], vec![])];
     let mut info = Vec::with_capacity(n);
@@ -182,7 +287,6 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
         let nv = b[p] as usize;
         let t = b[p + 1];
         let cy = b[p + 2];
-        let zv = b[p + 3];
         let h = u16_(p + 4) as f32 / 10.0;
         let b0 = u16_(p + 6) as f32 / 10.0;
         let (uw, ud, fl) = (b[p + 8], b[p + 9], b[p + 10]);
@@ -195,10 +299,8 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
             let x = i16_(p) as f32 / 10.0 + ox;
             let yy = i16_(p + 2) as f32 / 10.0 + oy;
             p += 4;
-            xs.push(x);
-            ys.push(yy);
-            cx += x;
-            cyy += yy;
+            xs.push(x); ys.push(yy);
+            cx += x; cyy += yy;
         }
         if nv < 3 { continue; }
         cx /= nv as f32;
@@ -206,82 +308,187 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
         let g = hg.at(cx as f64, cyy as f64).max(0.3);
         let z0 = g + b0 - if b0 > 0.0 { 0.0 } else { 3.0 };
         let z1 = g + h.max(b0 + 2.5);
-        let meta = [t, cy, (zv >> 4) & 15, 0];
-        let days = [sd, ed, dd, 0];
         let mut ar = 0.0;
         let mut j = nv - 1;
-        for k in 0..nv {
-            ar += xs[j] * ys[k] - xs[k] * ys[j];
-            j = k;
-        }
-        if ar < 0.0 {
-            xs.reverse();
-            ys.reverse();
-        }
+        for k in 0..nv { ar += xs[j] * ys[k] - xs[k] * ys[j]; j = k; }
+        if ar < 0.0 { xs.reverse(); ys.reverse(); }
+        let area = ar.abs() / 2.0;
+        // 樣式庫：依位置雜湊選樣式（0..7）與色票（0..15）
+        let hs = hash2(cx * 0.37, cyy * 0.37);
+        let style = (hs % 8) as u8;
+        let pal = ((hs >> 8) % 16) as u8;
+        let meta = [t, cy, style | (pal << 4), 0];
+        let days = [sd, ed, dd, 0];
         let part = &mut parts[if h >= SMALL_CUT { 0 } else { 1 }];
-        let mut perim = 0.0;
-        for k in 0..nv {
-            let k2 = (k + 1) % nv;
-            let (ax, ay, bx, by) = (xs[k], ys[k], xs[k2], ys[k2]);
-            let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
-            if l < 0.05 { continue; }
-            let nx = (by - ay) / l;
-            let nz = (bx - ax) / l;
-            let base = part.0.len() as u32;
-            let vb = z0 - g;
-            let nn = [(nx * 127.0) as i8, 0, (nz * 127.0) as i8, 0];
-            for (x, yy, z, u, v) in [(ax, ay, z0, perim, vb), (bx, by, z0, perim + l, vb), (bx, by, z1, perim + l, z1 - g), (ax, ay, z1, perim, z1 - g)] {
-                part.0.push(BVertex { pos: [x, z, -yy], nrm: nn, uv: [u, v], meta, days, base: z0 });
+        let o = obb(&xs, &ys, area);
+        let (ocx, ocy, ax, hw, hd, fill) = o;
+        let mut e = Emit { v: &mut part.0, i: &mut part.1, meta, days, z0, g, cx, cy: cyy };
+        let floor_h = if t == 0 || t == 8 { 4.0 } else { 3.2 };
+        let rect = fill > 0.82 && nv <= 8;
+        // 頂部形式：0 平頂（女兒牆）、1 雙斜、2 四坡、3 單斜、4 鋸齒、5 筒拱、9 無頂部處理
+        let mut top_xs = xs.clone(); let mut top_ys = ys.clone();
+        let mut roof = 0u8;
+        let hgt = z1 - g;
+        match t {
+            // 透天、戰前民居：斜屋頂為主
+            3 | 10 | 11 => {
+                if rect && hgt < 16.0 && hd > 2.5 { roof = [1, 2, 1, 3, 2, 0, 1, 2][style as usize]; }
+                e.walls(&xs, &ys, z0, z1, 0);
             }
-            part.1.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-            perim += l;
+            // 中高層住宅
+            1 | 2 => {
+                let k = style % 5;
+                if k == 1 && hgt > 15.0 && hd > 6.0 {
+                    // 頂樓退縮
+                    let zt = z1 - floor_h * if t == 1 { 3.0 } else { 1.0 };
+                    e.walls(&xs, &ys, z0, zt, 0); e.cap(&xs, &ys, zt, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, 2.4, 2.4);
+                    e.walls(&ix, &iy, zt, z1, 0); top_xs = ix; top_ys = iy;
+                } else if k == 2 && hgt > 12.0 && hd > 7.0 {
+                    // 店鋪裙樓＋住宅主體
+                    let zp = (g + floor_h * if t == 1 { 3.0 } else { 1.0 } + 0.6).min(z1 - 3.0);
+                    e.walls(&xs, &ys, z0, zp, 0); e.cap(&xs, &ys, zp, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, 2.0, 2.0);
+                    e.walls(&ix, &iy, zp, z1, 0); top_xs = ix; top_ys = iy;
+                } else if k == 3 && t == 1 && hgt > 30.0 && hd > 8.0 {
+                    // 兩段退縮
+                    let za = g + hgt * 0.62; let zb = g + hgt * 0.84;
+                    e.walls(&xs, &ys, z0, za, 0); e.cap(&xs, &ys, za, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, 2.5, 1.5);
+                    e.walls(&ix, &iy, za, zb, 0); e.cap(&ix, &iy, zb, 1);
+                    let (jx, jy) = inset(&xs, &ys, &o, 5.0, 3.0);
+                    e.walls(&jx, &jy, zb, z1, 0); top_xs = jx; top_ys = jy;
+                } else {
+                    e.walls(&xs, &ys, z0, z1, 0);
+                    if k == 4 && rect && t == 2 && hgt < 26.0 { roof = 2; }
+                }
+            }
+            // 辦公、超高層
+            0 | 8 => {
+                let k = style % 5;
+                if k == 1 && hgt > 40.0 && hd > 10.0 {
+                    // 婚禮蛋糕式退縮
+                    let za = g + hgt * 0.55; let zb = g + hgt * 0.8;
+                    e.walls(&xs, &ys, z0, za, 0); e.cap(&xs, &ys, za, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, hw * 0.12, hd * 0.12);
+                    e.walls(&ix, &iy, za, zb, 0); e.cap(&ix, &iy, zb, 1);
+                    let (jx, jy) = inset(&xs, &ys, &o, hw * 0.25, hd * 0.25);
+                    e.walls(&jx, &jy, zb, z1, 0); top_xs = jx; top_ys = jy;
+                } else if k == 2 && hgt > 30.0 && hd > 12.0 {
+                    // 裙樓＋塔樓
+                    let zp = g + floor_h * 5.0;
+                    e.walls(&xs, &ys, z0, zp, 0); e.cap(&xs, &ys, zp, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, hw * 0.28, hd * 0.25);
+                    e.walls(&ix, &iy, zp, z1, 0); top_xs = ix; top_ys = iy;
+                } else if k == 3 && hgt > 50.0 {
+                    // 發光冠頂＋尖塔
+                    let zc = z1 - floor_h * 2.0;
+                    e.walls(&xs, &ys, z0, zc, 0); e.cap(&xs, &ys, zc, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, 1.2, 1.2);
+                    e.walls(&ix, &iy, zc, z1, 4); top_xs = ix; top_ys = iy;
+                    if hgt > 120.0 { e.bx(ocx, ocy, ax, 0.8, 0.8, z1, z1 + hgt * 0.12, 2); }
+                } else if k == 4 && rect && hgt > 30.0 {
+                    roof = 3; e.walls(&xs, &ys, z0, z1, 0);   // 斜切屋頂
+                } else {
+                    e.walls(&xs, &ys, z0, z1, 0);
+                }
+            }
+            // 商住混合：店面裙樓＋退縮住宅
+            4 => {
+                let zp = (g + 3.2 * 2.0 + 1.0).min(z1 - 2.0);
+                e.walls(&xs, &ys, z0, zp, 0); e.cap(&xs, &ys, zp, 1);
+                if hd > 6.0 && hgt > 10.0 {
+                    let d = 1.5 + (style % 3) as f32;
+                    let (ix, iy) = inset(&xs, &ys, &o, d, d);
+                    e.walls(&ix, &iy, zp, z1, 0); top_xs = ix; top_ys = iy;
+                } else { e.walls(&xs, &ys, zp, z1, 0); }
+            }
+            // 工業：鋸齒、筒拱、低斜
+            6 => {
+                if rect && hd > 6.0 { roof = [4, 5, 1, 0, 4, 5, 1, 4][style as usize]; }
+                e.walls(&xs, &ys, z0, z1, 0);
+            }
+            // 公共、學校：四坡、退縮、平頂
+            5 | 7 => {
+                let k = style % 4;
+                if k == 1 && rect && hgt < 22.0 { roof = 2; e.walls(&xs, &ys, z0, z1, 0); }
+                else if k == 2 && hgt > 12.0 && hd > 6.0 {
+                    let zt = z1 - 3.6;
+                    e.walls(&xs, &ys, z0, zt, 0); e.cap(&xs, &ys, zt, 1);
+                    let (ix, iy) = inset(&xs, &ys, &o, hw * 0.2, 2.0);
+                    e.walls(&ix, &iy, zt, z1, 0); top_xs = ix; top_ys = iy;
+                } else { e.walls(&xs, &ys, z0, z1, 0); }
+            }
+            _ => { e.walls(&xs, &ys, z0, z1, 0); }
         }
-        let tri = earcut(&xs, &ys);
-        let base = part.0.len() as u32;
-        for k in 0..nv {
-            part.0.push(BVertex { pos: [xs[k], z1, -ys[k]], nrm: [0, 127, 0, 0], uv: [0.0, -1.0], meta: [meta[0], meta[1], meta[2], 1], days, base: z0 });
+        e.cap(&top_xs, &top_ys, z1, 1);
+        // 斜屋頂（以外接矩形為準，略出簷）
+        let (ux, uy) = ax; let (vx, vy) = (-uy, ux);
+        let c4 = |a: f32, bb: f32, z: f32| [ocx + ux * a + vx * bb, ocy + uy * a + vy * bb, z];
+        let (ew, eh) = (hw + 0.4, hd + 0.4);
+        let rise = (hd * if t == 6 { 0.22 } else { 0.55 }).min(6.0);
+        match roof {
+            1 => {
+                e.face(&[c4(-ew, -eh, z1), c4(ew, -eh, z1), c4(ew, 0.0, z1 + rise), c4(-ew, 0.0, z1 + rise)], 3, false);
+                e.face(&[c4(-ew, eh, z1), c4(ew, eh, z1), c4(ew, 0.0, z1 + rise), c4(-ew, 0.0, z1 + rise)], 3, false);
+                e.face(&[c4(-hw, -hd, z1), c4(-hw, hd, z1), c4(-hw, 0.0, z1 + rise)], 0, true);
+                e.face(&[c4(hw, -hd, z1), c4(hw, hd, z1), c4(hw, 0.0, z1 + rise)], 0, true);
+            }
+            2 => {
+                let r = (ew - eh).max(0.0);
+                e.face(&[c4(-ew, -eh, z1), c4(ew, -eh, z1), c4(r, 0.0, z1 + rise), c4(-r, 0.0, z1 + rise)], 3, false);
+                e.face(&[c4(-ew, eh, z1), c4(ew, eh, z1), c4(r, 0.0, z1 + rise), c4(-r, 0.0, z1 + rise)], 3, false);
+                e.face(&[c4(-ew, -eh, z1), c4(-ew, eh, z1), c4(-r, 0.0, z1 + rise)], 3, false);
+                e.face(&[c4(ew, -eh, z1), c4(ew, eh, z1), c4(r, 0.0, z1 + rise)], 3, false);
+            }
+            3 => {
+                let rs = rise * if t == 0 || t == 8 { 2.2 } else { 0.7 };
+                let fl3 = if t == 0 || t == 8 { 4 } else { 3 };
+                e.face(&[c4(-ew, -eh, z1), c4(ew, -eh, z1), c4(ew, eh, z1 + rs), c4(-ew, eh, z1 + rs)], fl3, false);
+                e.face(&[c4(-hw, hd, z1), c4(hw, hd, z1), c4(hw, hd, z1 + rs), c4(-hw, hd, z1 + rs)], 0, true);
+                e.face(&[c4(-hw, -hd, z1), c4(-hw, hd, z1), c4(-hw, hd, z1 + rs)], 0, true);
+                e.face(&[c4(hw, -hd, z1), c4(hw, hd, z1), c4(hw, hd, z1 + rs)], 0, true);
+            }
+            4 => {
+                // 鋸齒：沿長軸每 9 m 一齒，北向採光玻璃
+                let teeth = ((2.0 * hw) / 9.0).floor().max(2.0) as i32;
+                let step = 2.0 * hw / teeth as f32; let rs = 3.2;
+                for k in 0..teeth {
+                    let a0 = -hw + step * k as f32; let a1 = a0 + step;
+                    e.face(&[c4(a0, -hd, z1), c4(a0, hd, z1), c4(a1, hd, z1 + rs), c4(a1, -hd, z1 + rs)], 3, false);
+                    e.face(&[c4(a1, -hd, z1), c4(a1, hd, z1), c4(a1, hd, z1 + rs), c4(a1, -hd, z1 + rs)], 4, false);
+                    e.face(&[c4(a0, -hd, z1), c4(a1, -hd, z1), c4(a1, -hd, z1 + rs)], 0, true);
+                    e.face(&[c4(a0, hd, z1), c4(a1, hd, z1), c4(a1, hd, z1 + rs)], 0, true);
+                }
+            }
+            5 => {
+                // 筒拱：橫斷面 8 段圓弧
+                let rs = (hd * 0.45).min(7.0);
+                let seg = 8;
+                let pt = |k: i32| { let th = std::f32::consts::PI * k as f32 / seg as f32; (-hd * th.cos(), rs * th.sin()) };
+                for k in 0..seg {
+                    let (b0_, z0_) = pt(k); let (b1_, z1_) = pt(k + 1);
+                    e.face(&[c4(-hw, b0_, z1 + z0_), c4(hw, b0_, z1 + z0_), c4(hw, b1_, z1 + z1_), c4(-hw, b1_, z1 + z1_)], 3, false);
+                }
+                for sgn in [-1.0f32, 1.0] {
+                    let pts: Vec<[f32; 3]> = (0..=seg).map(|k| { let (bb, zz) = pt(k); c4(sgn * hw, bb, z1 + zz) }).collect();
+                    e.face(&pts, 0, true);
+                }
+            }
+            _ => {}
         }
-        for c in tri.chunks(3) {
-            part.1.extend_from_slice(&[base + c[0], base + c[2], base + c[1]]);
-        }
-        // 屋頂細節：女兒牆（12 m 以上）、屋頂機房（15 m 以上，非透天）
-        if h >= 12.0 && t != 9 {
+        // 屋頂細節：女兒牆（12 m 以上平頂）、屋頂機房（15 m 以上）
+        if roof == 0 && h >= 12.0 && t != 9 {
             let ph = if h > 60.0 { 1.6 } else { 1.0 };
-            for k in 0..nv {
-                let k2 = (k + 1) % nv;
-                let (ax, ay, bx, by) = (xs[k], ys[k], xs[k2], ys[k2]);
-                let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
-                if l < 0.3 { continue; }
-                let (nx, nz) = ((by - ay) / l, (bx - ax) / l);
-                for (sgn, off) in [(1.0f32, 0.0f32), (-1.0, 0.35)] {
-                    let (ix, iy) = (-(by - ay) / l * off, (bx - ax) / l * off);
-                    let base = part.0.len() as u32;
-                    let nn = [(nx * 127.0 * sgn) as i8, 0, (nz * 127.0 * sgn) as i8, 0];
-                    for (x, yy, z) in [(ax + ix, ay + iy, z1), (bx + ix, by + iy, z1), (bx + ix, by + iy, z1 + ph), (ax + ix, ay + iy, z1 + ph)] {
-                        part.0.push(BVertex { pos: [x, z, -yy], nrm: nn, uv: [0.0, -2.0], meta: [meta[0], meta[1], meta[2], 2], days, base: z0 });
-                    }
-                    part.1.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-                }
-            }
+            let (ix, iy) = inset(&top_xs, &top_ys, &obb(&top_xs, &top_ys, area), 0.35, 0.35);
+            e.walls(&top_xs, &top_ys, z1, z1 + ph, 2);
+            e.walls(&ix, &iy, z1, z1 + ph, 2);
             if h >= 15.0 && t != 3 && t != 10 {
-                let (mnx, mxx) = xs.iter().fold((f32::MAX, f32::MIN), |a, &v| (a.0.min(v), a.1.max(v)));
-                let (mny, mxy) = ys.iter().fold((f32::MAX, f32::MIN), |a, &v| (a.0.min(v), a.1.max(v)));
-                let sz = ((mxx - mnx).min(mxy - mny) * 0.3).clamp(2.5, 12.0);
-                let (bh, cx2, cy2) = (if t == 8 || t == 0 { 5.0 } else { 3.0 }, cx, cyy);
-                let q = [(cx2 - sz / 2.0, cy2 - sz / 2.0), (cx2 + sz / 2.0, cy2 - sz / 2.0), (cx2 + sz / 2.0, cy2 + sz / 2.0), (cx2 - sz / 2.0, cy2 + sz / 2.0)];
-                for k in 0..4 {
-                    let (a_, b_) = (q[k], q[(k + 1) % 4]);
-                    let l = ((b_.0 - a_.0).powi(2) + (b_.1 - a_.1).powi(2)).sqrt();
-                    let (nx, nz) = ((b_.1 - a_.1) / l, (b_.0 - a_.0) / l);
-                    let base = part.0.len() as u32;
-                    for (x, yy, z) in [(a_.0, a_.1, z1), (b_.0, b_.1, z1), (b_.0, b_.1, z1 + bh), (a_.0, a_.1, z1 + bh)] {
-                        part.0.push(BVertex { pos: [x, z, -yy], nrm: [(nx * 127.0) as i8, 0, (nz * 127.0) as i8, 0], uv: [0.0, -2.0], meta: [meta[0], meta[1], meta[2], 2], days, base: z0 });
-                    }
-                    part.1.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-                }
-                let base = part.0.len() as u32;
-                for &(x, yy) in &q { part.0.push(BVertex { pos: [x, z1 + bh, -yy], nrm: [0, 127, 0, 0], uv: [0.0, -1.0], meta: [meta[0], meta[1], meta[2], 1], days, base: z0 }); }
-                part.1.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+                let sz = (hd * 0.6).clamp(2.5, 12.0);
+                let bh = if t == 8 || t == 0 { 5.0 } else { 3.0 };
+                let off = ((style as f32) - 3.5) / 3.5 * (hw * 0.4);
+                e.bx(ocx + ux * off, ocy + uy * off, ax, sz / 2.0 * 1.3, sz / 2.0, z1, z1 + bh, 2);
+                if style % 3 == 0 && hd > 10.0 { e.bx(ocx - ux * off * 0.8 + vx * hd * 0.4, ocy - uy * off * 0.8 + vy * hd * 0.4, ax, 1.6, 1.6, z1, z1 + 3.0, 2); }   // 水塔
             }
         }
         info.push(BInfo { xs, ys, z0, z1, t, floors: fl, uw, ud, h, s: sd, e: ed, dd });

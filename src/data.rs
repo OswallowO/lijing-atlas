@@ -108,6 +108,9 @@ pub struct Data {
     pub coast: (usize, usize, Vec<u8>),
     pub ground: image::RgbaImage,
     pub ground_pre: image::RgbaImage,
+    pub ground_dev: image::RgbaImage,
+    pub sites: Value,
+    pub zone: Value,
     pub bld: Vec<u8>,
     pub roads: Vec<u8>,
     pub story: Value,
@@ -160,6 +163,9 @@ impl Data {
         progress(0.25, "讀取地表貼圖…");
         let ground = image::load_from_memory(&read(&dir, "ground.jpg")?).map_err(|e| e.to_string())?.to_rgba8();
         let ground_pre = image::load_from_memory(&read(&dir, "ground_pre.jpg")?).map_err(|e| e.to_string())?.to_rgba8();
+        let ground_dev = image::load_from_memory(&read(&dir, "ground_dev.png")?).map_err(|e| e.to_string())?.to_rgba8();
+        let sites = json(&dir, "sites.json").unwrap_or(Value::Null);
+        let zone = json(&dir, "zone.json").unwrap_or(Value::Null);
         progress(0.4, "讀取建物與道路…");
         let bld = read(&dir, "bld.bin")?;
         let roads = read(&dir, "roads.bin")?;
@@ -171,6 +177,6 @@ impl Data {
         let villages = json(&dir, "villages_real.json")?;
         let islands = json(&dir, "islands_real.json")?;
         let peaks = json(&dir, "peaks.json")?;
-        Ok(Data { dir, meta, geo, hg, coast, ground, ground_pre, bld, roads, story, scene_meta, scene_verts, interior_verts, villages, islands, peaks })
+        Ok(Data { dir, meta, geo, hg, coast, ground, ground_pre, ground_dev, sites, zone, bld, roads, story, scene_meta, scene_verts, interior_verts, villages, islands, peaks })
     }
 }
