@@ -209,7 +209,6 @@ fn vs_bld(@location(0) p: vec3<f32>, @location(1) n: vec4<f32>, @location(2) uv:
   if (hide) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
 }
-@fragment
 fn pal_res(k: u32) -> vec3<f32> {
   // 住宅／公共外牆色票（線性空間前的 sRGB）
   var c = array<vec3<f32>, 8>(vec3<f32>(0.96, 0.95, 0.92), vec3<f32>(0.93, 0.89, 0.80), vec3<f32>(0.86, 0.80, 0.70), vec3<f32>(0.82, 0.83, 0.84),
@@ -226,6 +225,7 @@ fn pal_roof(k: u32, ind: bool) -> vec3<f32> {
   if (ind) { return to_lin(m[k % 3u]); }
   return to_lin(c[k % 6u]);
 }
+@fragment
 fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
   let ti = i32(i.m.x); let cyv = f32(i.m.y); let roof = i.m.w == 1u;
   let style = i.m.z & 15u; let pal = i.m.z >> 4u; let va = f32(style);
