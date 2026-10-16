@@ -98,6 +98,7 @@ pub struct World {
     hover_t: f32,
     last_mouse: Pos2,
     side_open: bool,
+    side_w: f32,
     tl_open: bool,
     cs2: (f64, f64, f32, f32), // 框心 lon/lat、可建造邊長 m、旋轉度
     cs2_msg: String,
@@ -164,13 +165,14 @@ impl World {
         let mut w = World {
             r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), focus_line: None, sel: Sel::None,
             labels: vec![], lms, keys: HashSet::new(), left_tilt: false, playing: false, play_t: 0.0, scale: 1.0, auto_res: true, fps: 0.0, fps_acc: (0.0, 0), frame_ms: 0.0,
-            search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, tl_open: true,
+            search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, side_w: 354.0, tl_open: true,
             cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], outlines: vec![], bounds: false, bound_sel: None, zone_line: false, d,
         };
         w.build_labels();
         w.build_outlines();
         w.set_time(Tod::Day);
         if std::env::var("LIJING_BOUNDS").is_ok() { w.bounds = true; w.zone_line = true; }
+        if std::env::var("LIJING_SIDE_CLOSED").is_ok() { w.side_open = false; }
         // 測試用：LIJING_VIEW=經度,緯度,距離,俯角,方位,年份；LIJING_INTERIOR=種類
         if let Ok(v) = std::env::var("LIJING_VIEW") {
             let a: Vec<f64> = v.split(',').filter_map(|x| x.parse().ok()).collect();
@@ -612,7 +614,7 @@ impl World {
         self.tool_bar(&ctx);
         self.bottom_bar(&ctx);
         if self.tl_open { self.timeline(&ctx); } else { self.timeline_tab(&ctx); }
-        if self.side_open { self.side_panel(&ctx); }
+        self.side_panel(&ctx);
         if let Some(i) = self.tour { self.tour_caption(&ctx, i); }
         if let Some((p, s)) = &self.hover {
             egui::Area::new(egui::Id::new("tip")).fixed_pos(*p + Vec2::new(14.0, 14.0)).order(egui::Order::Tooltip).interactable(false).show(&ctx, |ui| {
@@ -860,7 +862,18 @@ impl World {
 
     fn side_panel(&mut self, ctx: &egui::Context) {
         let h = ctx.content_rect().height() - 170.0;
-        egui::Area::new(egui::Id::new("side")).anchor(Align2::RIGHT_TOP, Vec2::new(-12.0, 72.0)).show(ctx, |ui| {
+        // 向右收合的滑動動畫；左緣的箭頭頁籤可開合
+        let t = ctx.animate_bool_with_time(egui::Id::new("side_anim"), self.side_open, 0.22);
+        let off = (1.0 - t) * (self.side_w + 16.0);
+        let tab_x = -12.0 - (self.side_w + 6.0) * t;
+        egui::Area::new(egui::Id::new("sidetab")).anchor(Align2::RIGHT_TOP, Vec2::new(tab_x, 84.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::new().fill(Color32::from_rgba_unmultiplied(247, 249, 250, 242)).corner_radius(egui::CornerRadius { nw: 8, sw: 8, ne: 0, se: 0 }).stroke(Stroke::new(1.0, LINE)).inner_margin(egui::Margin::symmetric(2, 10)).show(ui, |ui| {
+                let r = ui.add(egui::Button::new(egui::RichText::new(if self.side_open { "›" } else { "‹" }).size(18.0).color(INK)).frame(false).min_size(Vec2::new(18.0, 40.0)));
+                if r.on_hover_text(if self.side_open { "收合資訊面板" } else { "展開資訊面板" }).clicked() { self.side_open = !self.side_open; }
+            });
+        });
+        if t < 0.002 { return; }
+        let resp = egui::Area::new(egui::Id::new("side")).anchor(Align2::RIGHT_TOP, Vec2::new(-12.0 + off, 72.0)).show(ctx, |ui| {
             panel_frame().show(ui, |ui| {
                 ui.set_width(330.0);
                 ui.set_max_height(h);
@@ -903,9 +916,7 @@ impl World {
                 });
             });
         });
-        if !self.side_open {
-            egui::Area::new(egui::Id::new("sideopen")).anchor(Align2::RIGHT_TOP, Vec2::new(-12.0, 72.0)).show(ctx, |ui| { if ui.button("☰ 資訊").clicked() { self.side_open = true; } });
-        }
+        self.side_w = resp.response.rect.width().max(200.0);
     }
 
     fn line_chips(&mut self, ui: &mut egui::Ui) {
@@ -1001,10 +1012,6 @@ impl World {
         let (x, y) = self.d.geo.to_local(l.at.0, l.at.1);
         let g = self.d.hg.at(x, y);
         kv(ui, &[("佔地", format!("{}u × {}u（{} × {} m）", l.fp.0, l.fp.1, l.fp.0 * 8.0, l.fp.1 * 8.0)), ("高度", format!("{} m {}", l.h, l.floors)), ("地面標高", format!("{g:.1} m")), ("竣工", l.built.to_string()), ("座標", format!("{:.4}°N {:.4}°E", l.at.1, l.at.0))]);
-        if !l.chars.is_empty() {
-            eyebrow(ui, "相關角色");
-            ui.horizontal_wrapped(|ui| { for c in &l.chars { chip(ui, c, Color32::from_rgb(0xee, 0xf2, 0xf4), INK); } });
-        }
         let at = l.at;
         let (h, fp) = (l.h, l.fp);
         let kind = crate::interior::kind_for(&l.id);

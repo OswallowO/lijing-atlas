@@ -18,7 +18,7 @@ pub struct BVertex {
 pub struct RVertex {
     pub pos: [f32; 3],
     pub col: [u8; 4],
-    pub meta: [u16; 2], // 等級、通車日
+    pub meta: [u16; 4], // 等級、通車日、拆除日、0
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -506,11 +506,12 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
     let mut idx: Vec<u32> = vec![];
     let f = |o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     for s in 0..n {
-        let o = s * 20;
-        if o + 20 > b.len() { break; }
+        let o = s * 24;
+        if o + 24 > b.len() { break; }
         let (k, br) = (b[o] as usize, b[o + 1]);
         let day = u16::from_le_bytes([b[o + 2], b[o + 3]]);
-        let (ax, ay, bx, by) = (f(o + 4), f(o + 8), f(o + 12), f(o + 16));
+        let dd = u16::from_le_bytes([b[o + 4], b[o + 5]]);
+        let (ax, ay, bx, by) = (f(o + 8), f(o + 12), f(o + 16), f(o + 20));
         let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
         if l < 0.5 { continue; }
         let w = sh.widths.get(k).copied().unwrap_or(12.0) / 2.0;
@@ -531,7 +532,7 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
             };
             let (h0, h1) = (hh(x0, y0) + lift, hh(x1, y1) + lift);
             let base = v.len() as u32;
-            let meta = [k as u16, day];
+            let meta = [k as u16, day, dd, 0];
             let col = [c[0], c[1], c[2], 255];
             for (x, yy, h) in [(x0 + nx, y0 + ny, h0), (x0 - nx, y0 - ny, h0), (x1 - nx, y1 - ny, h1), (x1 + nx, y1 + ny, h1)] {
                 v.push(RVertex { pos: [x, h, -yy], col, meta });

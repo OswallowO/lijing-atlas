@@ -303,10 +303,11 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
 // ---------------- 道路 ----------------
 struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32> };
 @vertex
-fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec2<u32>) -> ROut {
+fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec4<u32>) -> ROut {
   var o: ROut; o.w = p; o.c = c.rgb;
   o.pos = G.view_proj * vec4<f32>(p, 1.0);
-  if (m.y > 0u && G.day.x < f32(m.y)) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  // 通車日之前、拆除日之後不顯示（戰前舊路在新路網動工前拆除）
+  if ((m.y > 0u && G.day.x < f32(m.y)) || (m.z > 0u && G.day.x >= f32(m.z))) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
 }
 @fragment
@@ -347,8 +348,10 @@ fn vs_line(@location(0) p: vec3<f32>, @location(1) perp: vec2<f32>, @location(2)
   var o: LOut;
   let g = u32(sdkg.w);
   let vis = group_vis(g);
-  let wpx = select(6.0, 8.0, G.ground_col.w > 0.5 && G.fog_col.w > 0.5);
-  let w = max(5.0, wpx * G.cs2b.w) * 0.5;
+  var wpx = select(6.0, 8.0, G.ground_col.w > 0.5 && G.fog_col.w > 0.5);
+  var wmin = 5.0;
+  if (sdkg.z > 2.5) { wpx = 2.5; wmin = 2.0; }   // 公車：細線
+  let w = max(wmin, wpx * G.cs2b.w) * 0.5;
   let q = p + vec3<f32>(perp.x, 0.0, perp.y) * sdkg.x * w;
   o.pos = G.view_proj * vec4<f32>(q, 1.0);
   o.pos.z = o.pos.z - 0.0004 * o.pos.w;
@@ -363,7 +366,7 @@ fn fs_line(i: LOut) -> @location(0) vec4<f32> {
   let night = G.sun_dir.w;
   let casing = mix(vec3<f32>(1.0), vec3<f32>(0.06, 0.09, 0.13), night);
   var c = to_lin(i.c.rgb) * mix(1.0, 1.3, night);
-  if (i.sdk.z > 0.5) {
+  if (i.sdk.z > 0.5 && i.sdk.z < 1.5) {
     c = mix(c, to_lin(casing), 0.3);
     if (a < 0.22 && fract(i.sdk.y / max(24.0, G.cs2b.w * 12.0)) < 0.5) { c = to_lin(casing); }
   }
