@@ -649,14 +649,17 @@ impl World {
                     let km: f64 = st["roadKm"].as_object().map(|o| o.values().filter_map(|v| v.as_f64()).sum()).unwrap_or(0.0);
                     let stat = |ui: &mut egui::Ui, a: String, b: &str| {
                         ui.separator();
-                        ui.vertical(|ui| { ui.label(egui::RichText::new(a).size(14.5).monospace().color(INK)); ui.label(egui::RichText::new(b).size(10.5).color(MUTED)); });
+                        ui.vertical(|ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(a).size(14.5).monospace().color(INK)).wrap_mode(egui::TextWrapMode::Extend));
+                            ui.add(egui::Label::new(egui::RichText::new(b).size(10.5).color(MUTED)).wrap_mode(egui::TextWrapMode::Extend));
+                        });
                     };
                     stat(ui, format!("{:.0} 萬", self.d.story["FACTS"]["pop"].as_f64().unwrap_or(0.0) / 1e4), "常住人口");
                     stat(ui, format!("{:.0} 萬", st["pop"].as_f64().unwrap_or(0.0) / 1e4), "模擬居住");
                     stat(ui, format!("{:.0} 萬", st["jobs"].as_f64().unwrap_or(0.0) / 1e4), "就業崗位");
                     stat(ui, format!("{:.0} km", km), "新設道路");
                     stat(ui, format!("{} 線 {} 站", self.d.scene_meta.lines.len(), self.d.scene_meta.stations.len()), "軌道");
-                    stat(ui, format!("{:.0}", self.fps), "FPS");
+                    stat(ui, format!("{:>3.0}", self.fps), "FPS");
                 });
             });
         });
@@ -718,7 +721,7 @@ impl World {
                     if seg(ui, &format!("解析度 {:.0}%{}", self.scale * 100.0, if self.auto_res { "（自動）" } else { "" }), false) {
                         if self.auto_res { self.auto_res = false; self.scale = 1.0; } else if self.scale >= 1.0 { self.scale = 0.7; } else { self.auto_res = true; }
                     }
-                    if ui.add(egui::Button::new(egui::RichText::new("故事場景巡禮").color(Color32::WHITE)).fill(ACCENT)).clicked() { self.start_tour(0); }
+                    if ui.add(egui::Button::new(egui::RichText::new("城市導覽").color(Color32::WHITE)).fill(ACCENT)).clicked() { self.start_tour(0); }
                 });
             });
         });
