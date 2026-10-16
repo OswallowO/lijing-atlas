@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::sync::{mpsc, Arc, Mutex};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Mode { Plan, ThreeD, Contour, Transit, Cs2 }
+pub enum Mode { Plan, ThreeD, Contour, Transit, Cs2, Overview }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tod { Dawn, Day, Dusk, Night }
 #[derive(Clone, PartialEq)]
@@ -52,6 +52,20 @@ pub struct Landmark {
     pub rot: f32,
 }
 
+pub const END_DAY: f32 = 4382.0; // 2025-12-31
+const SPEEDS: [(f32, &str); 5] = [(1.0, "每秒 1 天"), (7.0, "每秒 1 週"), (30.0, "每秒 1 月"), (91.0, "每秒 1 季"), (365.0, "每秒 1 年")];
+/// 2014-01-01 起算的日數 → 日期字串
+pub fn date_of(day: f32) -> String {
+    let mut d = day.max(0.0) as i32;
+    let mut y = 2014;
+    loop { let n = if y % 4 == 0 { 366 } else { 365 }; if d < n { break; } d -= n; y += 1; }
+    let ml = [31, if y % 4 == 0 { 29 } else { 28 }, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0;
+    while m < 11 && d >= ml[m] { d -= ml[m]; m += 1; }
+    format!("{y}-{:02}-{:02}", m + 1, d + 1)
+}
+pub fn day_of_year(y: i32) -> f32 { (y - 2014) as f32 * 365.25 }
+
 pub struct World {
     pub d: Data,
     pub r: Renderer,
@@ -60,6 +74,8 @@ pub struct World {
     tex: Option<egui::TextureId>,
     pub mode: Mode,
     pub year: i32,
+    pub day: f32,
+    speed: usize,
     tod: Tod,
     pub lines_on: HashSet<String>,
     focus_line: Option<String>,
@@ -139,7 +155,7 @@ impl World {
         cam.pitch = 42f32.to_radians();
         cam.yaw = 18f32.to_radians();
         let mut w = World {
-            r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, tod: Tod::Day, lines_on: HashSet::new(), focus_line: None, sel: Sel::None,
+            r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), focus_line: None, sel: Sel::None,
             labels: vec![], lms, keys: HashSet::new(), left_tilt: false, playing: false, play_t: 0.0, scale: 1.0, auto_res: true, fps: 0.0, fps_acc: (0.0, 0), frame_ms: 0.0,
             search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, tl_open: true,
             cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], d,
@@ -155,10 +171,11 @@ impl World {
                 w.cam.dist = a[2] as f32;
                 w.cam.pitch = (a[3] as f32).to_radians();
                 w.cam.yaw = -(a[4] as f32).to_radians();
-                w.year = a[5] as i32;
+                w.day = if (2014.0..2030.0).contains(&a[5]) { day_of_year(a[5] as i32) + 364.0 } else { a[5] as f32 };
             }
         }
         if let Ok(k) = std::env::var("LIJING_INTERIOR") { w.interior = Some(InteriorView::new(&k, "測試・內部剖面", None)); }
+        if std::env::var("LIJING_OVERVIEW").is_ok() { w.set_mode(Mode::Overview); w.cam.anim = None; let (x, y) = w.d.geo.to_local(119.772, 25.535); w.cam.target = Vec3::new(x as f32, 0.0, -(y as f32 - 9000.0)); w.cam.dist = 52000.0; w.cam.pitch = 48f32.to_radians(); w.cam.yaw = 12f32.to_radians(); }
         if std::env::var("LIJING_LINES").is_ok() { w.lines_on = w.d.scene_meta.lines.iter().map(|l| l.id.clone()).collect(); }
         w
     }
@@ -206,7 +223,7 @@ impl World {
     }
 
     fn line_on(&self, id: &str) -> bool {
-        if self.lines_on.is_empty() { self.mode == Mode::Transit } else { self.lines_on.contains(id) }
+        if self.lines_on.is_empty() { matches!(self.mode, Mode::Transit | Mode::Overview) } else { self.lines_on.contains(id) }
     }
 
     pub fn set_time(&mut self, t: Tod) {
@@ -227,6 +244,14 @@ impl World {
     fn set_mode(&mut self, m: Mode) {
         self.mode = m;
         self.orbit = false;
+        if m == Mode::Overview {
+            // 總圖：整座島的鳥瞰＋所有路線與交通樞紐
+            let (x, y) = self.d.geo.to_local(119.772, 25.535);
+            self.cam.fly_to(x as f32, y as f32 - 9000.0, Some(52000.0), Some(-12.0), Some(48.0), 1.4);
+            self.side_open = true;
+            self.sel = Sel::None;
+            return;
+        }
         let top = m != Mode::ThreeD;
         let dist = match m { Mode::Transit => Some(self.cam.dist.max(26000.0)), Mode::Cs2 => Some(self.cam.dist.max(70000.0)), _ => None };
         let (x, y) = if m == Mode::Cs2 { let p = self.d.geo.to_local(self.cs2.0, self.cs2.1); (p.0 as f32, p.1 as f32) } else { (self.cam.target.x, -self.cam.target.z) };
@@ -266,6 +291,7 @@ impl World {
         let top = ((c.pitch - 1.0) / 0.5).clamp(0.0, 1.0);
         g.sun_col[3] = 1.0 / (c.dist * 1.2 + 10000.0) * (1.0 - 0.65 * top);
         g.sky_col[3] = self.year as f32;
+        g.day = [self.day, t, 0.0, 0.0];
         g.ground_col[3] = match self.mode { Mode::Contour => 2.0, Mode::Transit => 1.0, _ => 0.0 };
         g.fog_col[3] = match self.mode { Mode::Transit => 0.85, Mode::Contour => 0.6, _ => 0.0 };
         let (cx, cy) = self.d.geo.to_local(self.cs2.0, self.cs2.1);
@@ -357,15 +383,19 @@ impl World {
             if k(K::Minus) { self.cam.dist = (self.cam.dist * (1.0 + dt * 1.5)).min(160000.0); any = true; }
             if any { self.cam.anim = None; self.orbit = false; }
             ctx.input(|i| {
-                for (key, m) in [(K::Num1, Mode::Plan), (K::Num2, Mode::ThreeD), (K::Num3, Mode::Contour), (K::Num4, Mode::Transit), (K::Num5, Mode::Cs2)] {
+                for (key, m) in [(K::Num1, Mode::Plan), (K::Num2, Mode::ThreeD), (K::Num3, Mode::Contour), (K::Num4, Mode::Transit), (K::Num5, Mode::Cs2), (K::Num6, Mode::Overview)] {
                     if i.key_pressed(key) { self.keys.insert(key); let _ = m; }
                 }
             });
-            let pressed: Vec<(egui::Key, Mode)> = [(K::Num1, Mode::Plan), (K::Num2, Mode::ThreeD), (K::Num3, Mode::Contour), (K::Num4, Mode::Transit), (K::Num5, Mode::Cs2)].into_iter().filter(|(k, _)| self.keys.remove(k)).collect();
+            let pressed: Vec<(egui::Key, Mode)> = [(K::Num1, Mode::Plan), (K::Num2, Mode::ThreeD), (K::Num3, Mode::Contour), (K::Num4, Mode::Transit), (K::Num5, Mode::Cs2), (K::Num6, Mode::Overview)].into_iter().filter(|(k, _)| self.keys.remove(k)).collect();
             for (_, m) in pressed { self.set_mode(m); }
             if ctx.input(|i| i.key_pressed(K::T)) { self.left_tilt = !self.left_tilt; }
             if ctx.input(|i| i.key_pressed(K::M)) { self.measure = if self.measure.is_some() { None } else { Some(vec![]) }; }
             if ctx.input(|i| i.key_pressed(K::Escape)) { self.measure = None; self.tour = None; self.orbit = false; self.interior = None; }
+        }
+        // 量測：右鍵刪除上一點，Shift＋右鍵全部清除
+        if resp.secondary_clicked() {
+            if let Some(m) = &mut self.measure { if mods.shift || mods.ctrl { m.clear(); } else { m.pop(); } }
         }
         // 點擊
         if resp.clicked() {
@@ -414,8 +444,9 @@ impl World {
             let dc = ((c.cx - o.x).powi(2) + (c.cz - o.z).powi(2)).sqrt();
             if dc > 6000.0 { continue; }
             for b in &info.b {
-                if b.y > 0 && yr < 1900 + b.y as i32 { continue; }
-                if b.dd > 0 && yr >= 2010 + b.dd as i32 { continue; }
+                let _ = yr;
+                if b.e > 0 && self.day < b.s as f32 { continue; }
+                if b.dd > 0 && self.day >= b.dd as f32 { continue; }
                 // 射線與稜柱：取外框 bbox 粗判後，以高度切片點在多邊形內判斷
                 let (mnx, mxx) = b.xs.iter().fold((f32::MAX, f32::MIN), |a, &v| (a.0.min(v), a.1.max(v)));
                 let (mny, mxy) = b.ys.iter().fold((f32::MAX, f32::MIN), |a, &v| (a.0.min(v), a.1.max(v)));
@@ -446,8 +477,10 @@ impl World {
         if b.uw > 0 { s += &format!("\n地塊 {}u × {}u（{}×{} m）", b.uw, b.ud, b.uw as u32 * 8, b.ud as u32 * 8); }
         s += &format!("\n{}F・高 {:.0} m", b.floors, b.h);
         if self.mode == Mode::Cs2 { s += &format!("\nCS2：{en}"); }
-        if b.y == 0 && b.t == 10 { s += "\n戰前既有建物"; } else if b.y > 0 { s += &format!("\n竣工 {}", 1900 + b.y as i32); }
-        if b.dd > 0 { s += &format!("\n{} 年拆除（都市更新）", 2010 + b.dd as i32); }
+        if b.e == 0 { s += "\n戰前既有建物"; } else if self.day < b.e as f32 {
+            s += &format!("\n施工中 {:.0}%（{} 開工，預計 {} 完工）", ((self.day - b.s as f32) / (b.e - b.s).max(1) as f32 * 100.0).clamp(0.0, 100.0), date_of(b.s as f32), date_of(b.e as f32));
+        } else { s += &format!("\n{} 開工・{} 竣工", date_of(b.s as f32), date_of(b.e as f32)); }
+        if b.dd > 0 { s += &format!("\n{} 拆除（都市更新）", date_of(b.dd as f32)); }
         Some(s)
     }
 
@@ -469,8 +502,10 @@ impl World {
         }
         if self.playing {
             self.play_t += dt;
-            if self.play_t > 1.2 { self.play_t = 0.0; if self.year >= 2025 { self.playing = false; } else { self.year += 1; } }
+            self.day += dt * SPEEDS[self.speed].0;
+            if self.day >= END_DAY { self.day = END_DAY; self.playing = false; }
         }
+        self.year = 2014 + (self.day / 365.25) as i32;
         if self.orbit { self.cam.yaw += dt * 0.18; }
         // 3D 視圖：全畫面
         let full = ctx.content_rect();
@@ -525,7 +560,11 @@ impl World {
             };
             if !on { continue; }
             let d = (l.p - self.cam.pos).length();
-            let maxd = if l.kind == LKind::Station && self.mode == Mode::Transit { 30000.0 } else if l.kind == LKind::Peak && self.mode == Mode::Contour { 60000.0 } else { l.max_d };
+            let ov = self.mode == Mode::Overview;
+            if ov && l.kind == LKind::Village { continue; }
+            let maxd = if l.kind == LKind::Station && ov { if l.lines.len() > 1 || l.text.ends_with("站") || l.text == "機場" { 120000.0 } else { 9000.0 } }
+                else if l.kind == LKind::Landmark && ov { if l.pri >= 9 { 120000.0 } else { 0.0 } }
+                else if l.kind == LKind::Station && self.mode == Mode::Transit { 30000.0 } else if l.kind == LKind::Peak && self.mode == Mode::Contour { 60000.0 } else { l.max_d };
             if d > maxd || d < l.min_d { continue; }
             items.push((l, d));
         }
@@ -589,6 +628,9 @@ impl World {
         if let Some(last) = pts.last() {
             p.text(*last + Vec2::new(10.0, -10.0), Align2::LEFT_BOTTOM, format!("{:.0} m・{:.1} u", d, d / 8.0), FontId::proportional(13.0), WARN);
         }
+        if m.len() < 2 || true {
+            p.text(rect.center_bottom() - Vec2::new(0.0, 250.0), Align2::CENTER_BOTTOM, "量測：左鍵加點・右鍵刪除上一點・Shift＋右鍵全部清除・Esc 結束", FontId::proportional(13.0), INK);
+        }
     }
 
     fn top_bar(&mut self, ctx: &egui::Context) {
@@ -649,7 +691,7 @@ impl World {
         egui::Area::new(egui::Id::new("tools")).anchor(Align2::LEFT_CENTER, Vec2::new(12.0, 0.0)).show(ctx, |ui| {
             panel_frame().show(ui, |ui| {
                 ui.vertical(|ui| {
-                    for (m, n, k) in [(Mode::Plan, "平面", "1"), (Mode::ThreeD, "立體", "2"), (Mode::Contour, "等高線", "3"), (Mode::Transit, "運輸", "4"), (Mode::Cs2, "CS2 規劃", "5")] {
+                    for (m, n, k) in [(Mode::Overview, "總圖", "6"), (Mode::Plan, "平面", "1"), (Mode::ThreeD, "立體", "2"), (Mode::Contour, "等高線", "3"), (Mode::Transit, "運輸", "4"), (Mode::Cs2, "CS2 規劃", "5")] {
                         if tool_button(ui, n, k, self.mode == m).clicked() { self.set_mode(m); }
                     }
                     ui.separator();
@@ -664,8 +706,8 @@ impl World {
             panel_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("時代").size(11.0).color(MUTED));
-                    if seg(ui, "戰前 2014", self.year < 2016) { self.year = 2014; }
-                    if seg(ui, "麗京 2025", self.year >= 2016) { self.year = 2025; }
+                    if seg(ui, "戰前 2014", self.year < 2016) { self.day = 0.0; self.playing = false; }
+                    if seg(ui, "麗京 2025", self.year >= 2016) { self.day = END_DAY; self.playing = false; }
                     ui.separator();
                     ui.label(egui::RichText::new("光線").size(11.0).color(MUTED));
                     for (t, n) in [(Tod::Dawn, "晨"), (Tod::Day, "日"), (Tod::Dusk, "暮"), (Tod::Night, "夜")] {
@@ -684,7 +726,7 @@ impl World {
 
     fn timeline_tab(&mut self, ctx: &egui::Context) {
         egui::Area::new(egui::Id::new("tltab")).anchor(Align2::CENTER_BOTTOM, Vec2::new(0.0, -64.0)).show(ctx, |ui| {
-            if ui.add(egui::Button::new(format!("時間軸 {}", if self.year < 2016 { "戰前".to_string() } else { self.year.to_string() })).fill(PAPER)).clicked() { self.tl_open = true; }
+            if ui.add(egui::Button::new(format!("時間軸 {}", date_of(self.day))).fill(PAPER)).clicked() { self.tl_open = true; }
         });
     }
 
@@ -696,20 +738,24 @@ impl World {
                 ui.horizontal(|ui| {
                     if ui.add(egui::Button::new(if self.playing { "❚❚" } else { "▶" }).min_size(Vec2::splat(36.0))).clicked() {
                         self.playing = !self.playing;
-                        if self.playing && self.year >= 2025 { self.year = 2014; }
+                        if self.playing && self.day >= END_DAY - 1.0 { self.day = 0.0; }
                     }
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(if self.year < 2015 { "戰前".to_string() } else { self.year.to_string() }).size(21.0).strong());
+                            ui.label(egui::RichText::new(date_of(self.day)).size(19.0).strong().monospace());
                             for (a, b, n, _) in stages.iter() {
                                 let on = self.year >= *a && self.year <= *b;
-                                if ui.add(egui::Button::new(egui::RichText::new(*n).size(11.0).color(if on { INK } else { MUTED }).strong()).frame(false)).clicked() { self.year = *b; self.playing = false; }
+                                if ui.add(egui::Button::new(egui::RichText::new(*n).size(11.0).color(if on { INK } else { MUTED }).strong()).frame(false)).clicked() { self.day = day_of_year(*a); self.playing = false; }
                             }
                             if ui.small_button("收合").clicked() { self.tl_open = false; }
                         });
-                        let mut y = self.year;
+                        let mut dd = self.day;
                         ui.spacing_mut().slider_width = ui.available_width() - 20.0;
-                        if ui.add(egui::Slider::new(&mut y, 2014..=2025).show_value(false)).changed() { self.year = y; self.playing = false; }
+                        if ui.add(egui::Slider::new(&mut dd, 0.0..=END_DAY).show_value(false)).changed() { self.day = dd.round(); self.playing = false; self.year = 2014 + (self.day / 365.25) as i32; }
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("播放速度").size(11.0).color(MUTED));
+                            for (k, (_, n)) in SPEEDS.iter().enumerate() { if seg(ui, n, self.speed == k) { self.speed = k; } }
+                        });
                         let st = stages.iter().find(|s| self.year >= s.0 && self.year <= s.1).unwrap_or(&stages[stages.len() - 1]);
                         ui.label(egui::RichText::new(st.2).strong().size(13.0));
                         ui.label(egui::RichText::new(st.3).size(12.0).color(MUTED));
@@ -742,6 +788,7 @@ impl World {
                         Mode::Contour => ("等高線模式".into(), "地形與高程".into(), "AWS Terrain Tiles（約 17 m）".into()),
                         Mode::Cs2 => ("CS2 規劃模式".into(), "《城市天際線2》尺度".into(), "1u = 8 m（一個分區格）".into()),
                         Mode::Plan => ("平面模式".into(), "俯視地圖".into(), "聯邦麗京特別市".into()),
+                        Mode::Overview => ("總圖".into(), "全島鳥瞰與交通樞紐".into(), "所有路線、轉乘站與主要地標".into()),
                         Mode::ThreeD => ("立體模式".into(), "白城全景".into(), "聯邦麗京特別市・Lijing Special Municipality".into()),
                     },
                 };
@@ -764,6 +811,7 @@ impl World {
                             Mode::Transit => self.transit_body(ui),
                             Mode::Contour => self.contour_body(ui),
                             Mode::Cs2 => self.cs2_body(ui),
+                            Mode::Overview => self.overview_map_body(ui),
                             _ => self.overview_body(ui),
                         },
                     }
@@ -826,6 +874,30 @@ impl World {
         self.line_chips(ui);
         ui.add_space(8.0);
         ui.label(egui::RichText::new("操作：左鍵拖曳平移（T 切換成左鍵轉視角）；右鍵／中鍵／Shift＋拖曳旋轉傾斜；滾輪縮放；WASD 移動、Q／E 旋轉、R／F 傾斜；1–5 切換模式、M 量測。").size(11.5).color(MUTED));
+    }
+
+    fn overview_map_body(&mut self, ui: &mut egui::Ui) {
+        eyebrow(ui, "交通樞紐（轉乘站，依路線數排序）");
+        let mut hubs: Vec<(usize, usize)> = self.d.scene_meta.stations.iter().enumerate().filter(|(_, s)| s.lines.len() > 1).map(|(i, s)| (i, s.lines.len())).collect();
+        hubs.sort_by(|a, b| b.1.cmp(&a.1));
+        for (i, _) in hubs.into_iter().take(16) {
+            let st = self.d.scene_meta.stations[i].clone();
+            let col = self.d.scene_meta.lines.iter().find(|l| l.id == st.lines[0]).map(|l| hex32(&l.color)).unwrap_or(INK);
+            if list_item(ui, col, &format!("{}站", st.n.trim_end_matches('站')), &st.lines.join("・"), &format!("{} 線", st.lines.len())).clicked() {
+                self.sel = Sel::Station(i);
+                self.fly_ll(st.ll[0], st.ll[1], 1600.0, Some(45.0));
+            }
+        }
+        ui.add_space(6.0);
+        eyebrow(ui, "路線");
+        for l in self.d.scene_meta.lines.clone() {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(26.0, 6.0), Sense::hover());
+                ui.painter().rect_filled(r, 3.0, hex32(&l.color));
+                ui.label(egui::RichText::new(format!("{}　{}", l.name, l.sub)).size(12.0));
+            });
+        }
+        ui.label(egui::RichText::new("左鍵拖曳平移、滾輪縮放；點選樞紐飛過去。按 2 回到一般立體檢視。").size(11.5).color(MUTED));
     }
 
     fn landmark_body(&mut self, ui: &mut egui::Ui, i: usize) {
@@ -1007,7 +1079,7 @@ impl World {
             UState::Available { tag, notes, .. } => Some(format!("有新版本 {tag}（目前 v{VERSION}）\n{}", notes.lines().take(4).collect::<Vec<_>>().join("\n"))),
             UState::Downloading { got, total } => Some(format!("下載更新中… {:.1} / {:.1} MB", *got as f64 / 1e6, *total as f64 / 1e6)),
             UState::Ready => Some("更新已下載，重新啟動即可套用。".to_string()),
-            UState::Failed(e) => Some(format!("更新失敗：{e}")),
+            UState::Failed(_) => None, // 查不到更新（離線等）時不打擾
             _ => None,
         };
         let Some(msg) = msg else { return };

@@ -17,6 +17,7 @@ struct Globals {
   heat_b: vec4<f32>,      // 熱區範圍
   type_col: array<vec4<f32>, 12>,
   groups: array<vec4<f32>, 16>, // 群組可見度（地標／路線）
+  day: vec4<f32>,               // x 目前日（2014-01-01 起算）、y 時間（秒）
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var h_tex: texture_2d<f32>;
@@ -170,27 +171,33 @@ fn fs_water(i: WOut) -> @location(0) vec4<f32> {
 }
 
 // ---------------- 建物 ----------------
+// 逐日：開工前不顯示；施工中依進度由底部長高，外觀為鷹架與防塵網；竣工後一般外觀；拆除日之後消失。
 struct BOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) w: vec3<f32>,
   @location(1) n: vec3<f32>,
   @location(2) uv: vec2<f32>,
   @location(3) @interpolate(flat) m: vec4<u32>,
+  @location(4) @interpolate(flat) prog: f32,
 };
 @vertex
-fn vs_bld(@location(0) p: vec3<f32>, @location(1) n: vec4<f32>, @location(2) uv: vec2<f32>, @location(3) m: vec4<u32>) -> BOut {
-  var o: BOut; o.w = p; o.n = n.xyz; o.uv = uv; o.m = m;
-  // 時間軸：尚未興建或已拆除者縮成退化三角形（不必進片段著色器）
-  let year = G.sky_col.w;
-  let y = f32(m.y); let dd = f32(m.w >> 4u);
-  var hide = (y > 0.5 && year < 1900.0 + y) || (dd > 0.5 && year >= 2010.0 + dd);
-  o.pos = G.view_proj * vec4<f32>(p, 1.0);
+fn vs_bld(@location(0) p: vec3<f32>, @location(1) n: vec4<f32>, @location(2) uv: vec2<f32>, @location(3) m: vec4<u32>, @location(4) days: vec4<u32>, @location(5) base: f32) -> BOut {
+  var o: BOut; o.n = n.xyz; o.uv = uv; o.m = m;
+  let day = G.day.x;
+  let s = f32(days.x); let e = f32(days.y); let dd = f32(days.z);
+  var prog = 1.0;
+  if (days.y > 0u) { prog = clamp((day - s) / max(e - s, 1.0), 0.0, 1.0); }
+  var q = p;
+  if (prog < 1.0) { q.y = base + (p.y - base) * max(prog, 0.02); }
+  o.w = q; o.prog = prog;
+  o.pos = G.view_proj * vec4<f32>(q, 1.0);
+  let hide = (days.y > 0u && day < s) || (days.z > 0u && day >= dd);
   if (hide) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
 }
 @fragment
 fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
-  let ti = i32(i.m.x); let cyv = f32(i.m.z); let va = f32(i.m.w & 15u);
+  let ti = i32(i.m.x); let cyv = f32(i.m.y); let va = f32(i.m.z); let roof = i.m.w == 1u;
   let year = G.sky_col.w; let night = G.sun_dir.w;
   var base = G.type_col[clamp(ti, 0, 11)].rgb;
   base = base * (0.95 + 0.05 * (va % 4.0) / 3.0);
@@ -201,19 +208,36 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
   var cw = 3.2; if (ti == 8) { cw = 2.4; } else if (ti == 3) { cw = 4.0; }
   let cx = i.uv.x / cw;
   let aa = clamp(1.6 - max(fwidth(cx), fwidth(i.uv.y / fh)) * 2.2, 0.0, 1.0);
-  if (abs(n.y) < 0.5 && ti != 9) {
-    let fl = floor(i.uv.y / fh); let fy = fract(i.uv.y / fh);
-    let fx = fract(cx);
+  let fl = floor(i.uv.y / fh); let fy = fract(i.uv.y / fh);
+  let fx = fract(cx);
+  let wall = abs(n.y) < 0.5 && ti != 9 && i.m.w != 2u;
+  if (wall) {
+    // 窗：玻璃帶＋直櫺；一樓為店面（較高的玻璃）；每 5 層一道設備層
     var win = step(0.28, fy) * step(fy, 0.86) * step(0.14, fx) * step(fx, 0.86) * step(1.0, fl);
+    let shop = (1.0 - step(1.0, fl)) * step(0.12, fy) * step(fy, 0.92) * step(0.06, fx) * step(fx, 0.94) * select(0.0, 1.0, ti == 4 || ti == 1 || ti == 0 || ti == 8);
+    let band = select(0.0, 1.0, (fl % 5.0) == 4.0 && ti != 3);
+    win = max(win * (1.0 - band * 0.8), shop);
     win = mix(0.3 * step(1.0, fl + 0.5), win, aa);
     var glassy = 0.22; if (ti == 8) { glassy = 0.55; } else if (ti == 0 || ti == 1) { glassy = 0.35; }
     if (ti == 10 || ti == 11) { glassy = 0.12; }
     base = mix(base, G.glass.rgb, win * glassy);
+    base = base * (1.0 - band * 0.12 * aa);
     var lit = step(0.52, hash3(vec3<f32>(floor(cx), fl, floor(i.w.x * 0.02) + floor(i.w.z * 0.02))));
     let wc = mix(vec3<f32>(1.0, 0.6, 0.2), vec3<f32>(0.4, 0.7, 1.0), step(0.7, hash3(vec3<f32>(fl, floor(cx) * 1.3, va))));
     lit = mix(0.3, lit, aa);
-    emis = win * lit * wc * night * 1.1;
+    emis = win * lit * wc * night * 1.1 + shop * night * vec3<f32>(1.0, 0.75, 0.45) * 0.8;
     base = base * (0.78 + 0.22 * clamp(i.uv.y / 8.0, 0.0, 1.0));
+  } else if (roof) {
+    base = base * 0.9;
+  } else if (i.m.w == 2u) {
+    base = mix(base, G.conc.rgb, 0.35);   // 女兒牆、屋頂機房
+  }
+  if (i.prog < 1.0) {
+    // 施工中：灰色鷹架、綠色防塵網格、頂部塔吊色
+    let net = step(0.5, fract(i.uv.x / 1.6)) * 0.15;
+    base = mix(vec3<f32>(0.42, 0.45, 0.43), vec3<f32>(0.16, 0.36, 0.22), 0.55 + net);
+    if (!wall) { base = vec3<f32>(0.55, 0.52, 0.48); }
+    emis = vec3<f32>(0.0);
   }
   var col = light(base, n);
   col = mix(col, col * 0.22, night) + emis;
@@ -225,11 +249,10 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
 // ---------------- 道路 ----------------
 struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32> };
 @vertex
-fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec4<u32>) -> ROut {
+fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec2<u32>) -> ROut {
   var o: ROut; o.w = p; o.c = c.rgb;
-  let year = G.sky_col.w;
   o.pos = G.view_proj * vec4<f32>(p, 1.0);
-  if (f32(m.y) > 0.5 && year < 1900.0 + f32(m.y)) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  if (m.y > 0u && G.day.x < f32(m.y)) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
 }
 @fragment

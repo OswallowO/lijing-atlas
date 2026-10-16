@@ -9,14 +9,16 @@ pub struct BVertex {
     pub pos: [f32; 3],
     pub nrm: [i8; 4],
     pub uv: [f32; 2],
-    pub meta: [u8; 4],
+    pub meta: [u8; 4],   // 類型、外牆包覆年（-1900）、變化、屋頂旗標
+    pub days: [u16; 4],  // 開工日、竣工日、拆除日、0（2014-01-01 起算）
+    pub base: f32,       // 建物底部高度（施工中依進度由此長高）
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct RVertex {
     pub pos: [f32; 3],
     pub col: [u8; 4],
-    pub meta: [u8; 4],
+    pub meta: [u16; 2], // 等級、通車日
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -46,8 +48,9 @@ pub struct BInfo {
     pub uw: u8,
     pub ud: u8,
     pub h: f32,
-    pub y: u8,
-    pub dd: u8,
+    pub s: u16,
+    pub e: u16,
+    pub dd: u16,
 }
 pub struct ChunkInfo {
     pub b: Vec<BInfo>,
@@ -175,15 +178,16 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
     let u16_ = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]);
     let i16_ = |o: usize| i16::from_le_bytes([b[o], b[o + 1]]);
     for _ in 0..n {
-        if p + 13 > b.len() { break; }
+        if p + 18 > b.len() { break; }
         let nv = b[p] as usize;
         let t = b[p + 1];
-        let y = b[p + 2];
-        let cy = b[p + 3];
+        let cy = b[p + 2];
+        let zv = b[p + 3];
         let h = u16_(p + 4) as f32 / 10.0;
         let b0 = u16_(p + 6) as f32 / 10.0;
-        let (uw, ud, fl, zv, dd) = (b[p + 8], b[p + 9], b[p + 10], b[p + 11], b[p + 12]);
-        p += 13;
+        let (uw, ud, fl) = (b[p + 8], b[p + 9], b[p + 10]);
+        let (sd, ed, dd) = (u16_(p + 12), u16_(p + 14), u16_(p + 16));
+        p += 18;
         let mut xs = Vec::with_capacity(nv);
         let mut ys = Vec::with_capacity(nv);
         let (mut cx, mut cyy) = (0.0f32, 0.0f32);
@@ -202,7 +206,8 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
         let g = hg.at(cx as f64, cyy as f64).max(0.3);
         let z0 = g + b0 - if b0 > 0.0 { 0.0 } else { 3.0 };
         let z1 = g + h.max(b0 + 2.5);
-        let meta = [t, y, cy, ((zv >> 4) & 15) | (dd << 4)];
+        let meta = [t, cy, (zv >> 4) & 15, 0];
+        let days = [sd, ed, dd, 0];
         let mut ar = 0.0;
         let mut j = nv - 1;
         for k in 0..nv {
@@ -226,7 +231,7 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
             let vb = z0 - g;
             let nn = [(nx * 127.0) as i8, 0, (nz * 127.0) as i8, 0];
             for (x, yy, z, u, v) in [(ax, ay, z0, perim, vb), (bx, by, z0, perim + l, vb), (bx, by, z1, perim + l, z1 - g), (ax, ay, z1, perim, z1 - g)] {
-                part.0.push(BVertex { pos: [x, z, -yy], nrm: nn, uv: [u, v], meta });
+                part.0.push(BVertex { pos: [x, z, -yy], nrm: nn, uv: [u, v], meta, days, base: z0 });
             }
             part.1.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
             perim += l;
@@ -234,12 +239,52 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
         let tri = earcut(&xs, &ys);
         let base = part.0.len() as u32;
         for k in 0..nv {
-            part.0.push(BVertex { pos: [xs[k], z1, -ys[k]], nrm: [0, 127, 0, 0], uv: [0.0, -1.0], meta });
+            part.0.push(BVertex { pos: [xs[k], z1, -ys[k]], nrm: [0, 127, 0, 0], uv: [0.0, -1.0], meta: [meta[0], meta[1], meta[2], 1], days, base: z0 });
         }
         for c in tri.chunks(3) {
             part.1.extend_from_slice(&[base + c[0], base + c[2], base + c[1]]);
         }
-        info.push(BInfo { xs, ys, z0, z1, t, floors: fl, uw, ud, h, y, dd });
+        // 屋頂細節：女兒牆（12 m 以上）、屋頂機房（15 m 以上，非透天）
+        if h >= 12.0 && t != 9 {
+            let ph = if h > 60.0 { 1.6 } else { 1.0 };
+            for k in 0..nv {
+                let k2 = (k + 1) % nv;
+                let (ax, ay, bx, by) = (xs[k], ys[k], xs[k2], ys[k2]);
+                let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
+                if l < 0.3 { continue; }
+                let (nx, nz) = ((by - ay) / l, (bx - ax) / l);
+                for (sgn, off) in [(1.0f32, 0.0f32), (-1.0, 0.35)] {
+                    let (ix, iy) = (-(by - ay) / l * off, (bx - ax) / l * off);
+                    let base = part.0.len() as u32;
+                    let nn = [(nx * 127.0 * sgn) as i8, 0, (nz * 127.0 * sgn) as i8, 0];
+                    for (x, yy, z) in [(ax + ix, ay + iy, z1), (bx + ix, by + iy, z1), (bx + ix, by + iy, z1 + ph), (ax + ix, ay + iy, z1 + ph)] {
+                        part.0.push(BVertex { pos: [x, z, -yy], nrm: nn, uv: [0.0, -2.0], meta: [meta[0], meta[1], meta[2], 2], days, base: z0 });
+                    }
+                    part.1.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+            }
+            if h >= 15.0 && t != 3 && t != 10 {
+                let (mnx, mxx) = xs.iter().fold((f32::MAX, f32::MIN), |a, &v| (a.0.min(v), a.1.max(v)));
+                let (mny, mxy) = ys.iter().fold((f32::MAX, f32::MIN), |a, &v| (a.0.min(v), a.1.max(v)));
+                let sz = ((mxx - mnx).min(mxy - mny) * 0.3).clamp(2.5, 12.0);
+                let (bh, cx2, cy2) = (if t == 8 || t == 0 { 5.0 } else { 3.0 }, cx, cyy);
+                let q = [(cx2 - sz / 2.0, cy2 - sz / 2.0), (cx2 + sz / 2.0, cy2 - sz / 2.0), (cx2 + sz / 2.0, cy2 + sz / 2.0), (cx2 - sz / 2.0, cy2 + sz / 2.0)];
+                for k in 0..4 {
+                    let (a_, b_) = (q[k], q[(k + 1) % 4]);
+                    let l = ((b_.0 - a_.0).powi(2) + (b_.1 - a_.1).powi(2)).sqrt();
+                    let (nx, nz) = ((b_.1 - a_.1) / l, (b_.0 - a_.0) / l);
+                    let base = part.0.len() as u32;
+                    for (x, yy, z) in [(a_.0, a_.1, z1), (b_.0, b_.1, z1), (b_.0, b_.1, z1 + bh), (a_.0, a_.1, z1 + bh)] {
+                        part.0.push(BVertex { pos: [x, z, -yy], nrm: [(nx * 127.0) as i8, 0, (nz * 127.0) as i8, 0], uv: [0.0, -2.0], meta: [meta[0], meta[1], meta[2], 2], days, base: z0 });
+                    }
+                    part.1.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+                let base = part.0.len() as u32;
+                for &(x, yy) in &q { part.0.push(BVertex { pos: [x, z1 + bh, -yy], nrm: [0, 127, 0, 0], uv: [0.0, -1.0], meta: [meta[0], meta[1], meta[2], 1], days, base: z0 }); }
+                part.1.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            }
+        }
+        info.push(BInfo { xs, ys, z0, z1, t, floors: fl, uw, ud, h, s: sd, e: ed, dd });
     }
     let [a, bb] = parts;
     (
@@ -256,7 +301,8 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
     for s in 0..n {
         let o = s * 20;
         if o + 20 > b.len() { break; }
-        let (k, y, br) = (b[o] as usize, b[o + 1], b[o + 2]);
+        let (k, br) = (b[o] as usize, b[o + 1]);
+        let day = u16::from_le_bytes([b[o + 2], b[o + 3]]);
         let (ax, ay, bx, by) = (f(o + 4), f(o + 8), f(o + 12), f(o + 16));
         let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
         if l < 0.5 { continue; }
@@ -278,7 +324,7 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
             };
             let (h0, h1) = (hh(x0, y0) + lift, hh(x1, y1) + lift);
             let base = v.len() as u32;
-            let meta = [k as u8, y, 0, 0];
+            let meta = [k as u16, day];
             let col = [c[0], c[1], c[2], 255];
             for (x, yy, h) in [(x0 + nx, y0 + ny, h0), (x0 - nx, y0 - ny, h0), (x1 - nx, y1 - ny, h1), (x1 + nx, y1 + ny, h1)] {
                 v.push(RVertex { pos: [x, h, -yy], col, meta });

@@ -30,6 +30,7 @@ pub struct Globals {
     pub heat_b: [f32; 4],
     pub type_col: [[f32; 4]; 12],
     pub groups: [[f32; 4]; 16],
+    pub day: [f32; 4], // 目前日（2014-01-01 起算）、施工動畫時間
 }
 
 struct GpuMesh {
@@ -289,8 +290,8 @@ impl Renderer {
         let vb = |stride: u64, step: wgpu::VertexStepMode, attrs: &'static [wgpu::VertexAttribute]| wgpu::VertexBufferLayout { array_stride: stride, step_mode: step, attributes: attrs };
         const T_V: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
         const T_I: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![1 => Float32x3];
-        const B_A: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Float32x2, 3 => Uint8x4];
-        const R_A: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Uint8x4];
+        const B_A: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Snorm8x4, 2 => Float32x2, 3 => Uint8x4, 4 => Uint16x4, 5 => Float32];
+        const R_A: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4, 2 => Uint16x2];
         const M_A: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4, 3 => Uint16x2];
         const L_A: [wgpu::VertexAttribute; 4] = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2, 2 => Unorm8x4, 3 => Float32x4];
         let _ = F::Float32;
