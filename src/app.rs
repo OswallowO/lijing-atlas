@@ -176,6 +176,7 @@ impl World {
         if std::env::var("LIJING_BOUNDS").is_ok() { w.bounds = true; w.zone_line = true; }
         if std::env::var("LIJING_SIDE_CLOSED").is_ok() { w.side_open = false; }
         if std::env::var("LIJING_TRANSIT").is_ok() { w.mode = Mode::Transit; }
+        if std::env::var("LIJING_ZONEMAP").is_ok() { w.zone_map = true; }
         // 測試用：LIJING_VIEW=經度,緯度,距離,俯角,方位,年份；LIJING_INTERIOR=種類
         if let Ok(v) = std::env::var("LIJING_VIEW") {
             let a: Vec<f64> = v.split(',').filter_map(|x| x.parse().ok()).collect();
@@ -1111,7 +1112,7 @@ impl World {
         for (lv, t) in [("+2", "上層高架：跨越高架道路或高鐵的捷運、快速道路交叉匝道（約 17–20 m）"), ("+1", "高架：快速道路、高鐵、外圍捷運（約 9–12 m）"), ("0", "地面：一般道路、幹線與接駁公車"), ("-1", "地下：市心與高密度區的捷運（淺色＋中央虛線）"), ("-2", "深層地下：與其他地下線交叉的區段")] {
             ui.horizontal(|ui| { ui.label(egui::RichText::new(lv).monospace().strong()); ui.label(egui::RichText::new(t).size(11.5).color(MUTED)); });
         }
-        ui.label(egui::RichText::new("規劃方針：首爾級密度（車站 800 m 內涵蓋約 93% 的人口與就業）、東京式直通（每線 14–28 km、穿越市心）、站距市心約 700 m／住宅區約 1 km／外圍約 1.4 km；公車分幹線（BRT，站距約 500 m）與接駁（站距約 300 m）兩層。").size(11.5).color(MUTED));
+        ui.label(egui::RichText::new("規劃方針：首爾級密度（車站 800 m 內涵蓋約 91% 的人口與就業）、東京式直通（每線 14–28 km、穿越市心）、站距市心約 700 m／住宅區約 1 km／外圍約 1.4 km；公車分幹線（BRT，站距約 500 m）與接駁（站距約 300 m）兩層。").size(11.5).color(MUTED));
     }
 
     fn contour_body(&mut self, ui: &mut egui::Ui) {
