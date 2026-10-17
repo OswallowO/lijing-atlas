@@ -51,6 +51,7 @@ pub struct BInfo {
     pub s: u16,
     pub e: u16,
     pub dd: u16,
+    pub cz: u8,
 }
 pub struct ChunkInfo {
     pub b: Vec<BInfo>,
@@ -230,7 +231,7 @@ impl<'a> Emit<'a> {
         let q: Vec<(f32, f32)> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|&(a, b)| (cx + ax.0 * hw * a + bxv.0 * hd * b, cy + ax.1 * hw * a + bxv.1 * hd * b)).collect();
         let xs: Vec<f32> = q.iter().map(|p| p.0).collect(); let ys: Vec<f32> = q.iter().map(|p| p.1).collect();
         self.walls(&xs, &ys, za, zb, flag);
-        self.cap(&xs, &ys, zb, if flag == 4 { 4 } else { 1 });
+        self.cap(&xs, &ys, zb, if flag == 4 || flag == 5 { flag } else { 1 });
     }
 }
 
@@ -287,6 +288,7 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
         let nv = b[p] as usize;
         let t = b[p + 1];
         let cy = b[p + 2];
+        let cz = b[p + 3];   // CS2 分區碼
         let h = u16_(p + 4) as f32 / 10.0;
         let b0 = u16_(p + 6) as f32 / 10.0;
         let (uw, ud, fl) = (b[p + 8], b[p + 9], b[p + 10]);
@@ -318,7 +320,7 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
         let style = (hs % 8) as u8;
         let pal = ((hs >> 8) % 16) as u8;
         let meta = [t, cy, style | (pal << 4), 0];
-        let days = [sd, ed, dd, 0];
+        let days = [sd, ed, dd, cz as u16];
         let part = &mut parts[if h >= SMALL_CUT { 0 } else { 1 }];
         let o = obb(&xs, &ys, area);
         let (ocx, ocy, ax, hw, hd, fill) = o;
@@ -491,7 +493,34 @@ fn build_buildings(hg: &HeightGrid, b: &[u8], n: usize, ox: f32, oy: f32) -> (Me
                 if style % 3 == 0 && hd > 10.0 { e.bx(ocx - ux * off * 0.8 + vx * hd * 0.4, ocy - uy * off * 0.8 + vy * hd * 0.4, ax, 1.6, 1.6, z1, z1 + 3.0, 2); }   // 水塔
             }
         }
-        info.push(BInfo { xs, ys, z0, z1, t, floors: fl, uw, ud, h, s: sd, e: ed, dd });
+        // Cyberpunk 細節（仍在 CS2 可建造範圍）：商業與商住的直立霓虹招牌、屋頂看板；住宅屋頂水塔與冷氣
+        let hs2 = hash2(cx * 1.7 + 3.0, cyy * 1.3 - 5.0);
+        if matches!(cz, 4 | 7 | 8) || (cz == 6 && hs2 % 3 == 0) {
+            let nsign = 1 + (hs2 % 2) as i32;
+            for k in 0..nsign {
+                let along = if k == 0 { -hw * 0.6 } else { hw * 0.55 };
+                let side = if (hs2 >> 3) % 2 == 0 { 1.0 } else { -1.0 };
+                let (sx, sy) = (ocx + ux * along + vx * (hd + 0.8) * side, ocy + uy * along + vy * (hd + 0.8) * side);
+                let sh = (4.0 + (hs2 >> (5 + k)) as f32 % 9.0).min(hgt - 3.0);
+                if sh > 2.5 { e.bx(sx, sy, (vx, vy), 0.9, 0.35, g + 3.5, g + 3.5 + sh, 5); }
+            }
+        }
+        if roof == 0 && (cz == 8 || (matches!(cz, 4 | 6 | 10) && hs2 % 4 == 1)) && hgt > 12.0 {
+            let bw = (hw * 0.9).min(14.0); let bh = 5.0 + (hs2 % 5) as f32;
+            let (bxc, byc) = (ocx + vx * hd * 0.7, ocy + vy * hd * 0.7);
+            e.bx(bxc, byc, ax, bw, 0.3, z1 + 2.0, z1 + 2.0 + bh, 5);
+            e.bx(bxc - ux * bw * 0.7, byc - uy * bw * 0.7, ax, 0.2, 0.2, z1, z1 + 2.0, 2);
+            e.bx(bxc + ux * bw * 0.7, byc + uy * bw * 0.7, ax, 0.2, 0.2, z1, z1 + 2.0, 2);
+        }
+        if roof == 0 && matches!(cz, 3 | 4 | 5 | 6 | 0) && hgt > 9.0 && hd > 4.0 {
+            let n = 2 + (hs2 % 4) as i32;
+            for k in 0..n {
+                let fa = ((hs2 >> (k * 3)) % 7) as f32 / 7.0 - 0.45; let fb = ((hs2 >> (k * 3 + 9)) % 5) as f32 / 5.0 - 0.4;
+                let (px_, py_) = (ocx + ux * hw * fa * 1.4 + vx * hd * fb * 1.4, ocy + uy * hw * fa * 1.4 + vy * hd * fb * 1.4);
+                if k == 0 { e.bx(px_, py_, ax, 1.3, 1.3, z1, z1 + 3.2, 2); } else { e.bx(px_, py_, ax, 0.6, 0.5, z1, z1 + 0.9, 2); }
+            }
+        }
+        info.push(BInfo { xs, ys, z0, z1, t, floors: fl, uw, ud, h, s: sd, e: ed, dd, cz });
     }
     let [a, bb] = parts;
     (

@@ -111,6 +111,7 @@ pub struct World {
     bounds: bool,            // 顯示分區邊界
     bound_sel: Option<usize>, // 只顯示某一分區
     zone_line: bool,         // 顯示特區範圍
+    zone_map: bool,          // CS2 分區圖
 }
 
 /// 地面外框（分區、特區、地標基地）
@@ -167,7 +168,7 @@ impl World {
             r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), lines_hide: HashSet::new(), focus_line: None, sel: Sel::None,
             labels: vec![], lms, keys: HashSet::new(), left_tilt: false, playing: false, play_t: 0.0, scale: 1.0, auto_res: true, fps: 0.0, fps_acc: (0.0, 0), frame_ms: 0.0,
             search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, side_w: 354.0, tl_open: true,
-            cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], outlines: vec![], bounds: false, bound_sel: None, zone_line: false, d,
+            cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], outlines: vec![], bounds: false, bound_sel: None, zone_line: false, zone_map: false, d,
         };
         w.build_labels();
         w.build_outlines();
@@ -377,7 +378,7 @@ impl World {
         let top = ((c.pitch - 1.0) / 0.5).clamp(0.0, 1.0);
         g.sun_col[3] = 1.0 / (c.dist * 1.2 + 10000.0) * (1.0 - 0.65 * top);
         g.sky_col[3] = self.year as f32;
-        g.day = [self.day, t, 0.0, 0.0];
+        g.day = [self.day, t, if self.zone_map { 1.0 } else { 0.0 }, 0.0];
         g.ground_col[3] = match self.mode { Mode::Contour => 2.0, Mode::Transit => 1.0, _ => 0.0 };
         g.fog_col[3] = match self.mode { Mode::Transit => 0.85, Mode::Contour => 0.6, _ => 0.0 };
         let (cx, cy) = self.d.geo.to_local(self.cs2.0, self.cs2.1);
@@ -558,10 +559,10 @@ impl World {
         }
         let (_, b) = best?;
         let (zh, en) = type_cs2(b.t);
-        let mut s = zh.to_string();
-        if b.uw > 0 { s += &format!("\n地塊 {}u × {}u（{}×{} m）", b.uw, b.ud, b.uw as u32 * 8, b.ud as u32 * 8); }
+        let mut s = if b.cz > 0 { format!("CS2：{}", CZ_NAMES[b.cz.min(12) as usize]) } else { zh.to_string() };
+        if b.uw > 0 { s += &format!("\n地塊 {} × {} 格（{}×{} m）", b.uw, b.ud, b.uw as u32 * 8, b.ud as u32 * 8); }
         s += &format!("\n{}F・高 {:.0} m", b.floors, b.h);
-        if self.mode == Mode::Cs2 { s += &format!("\nCS2：{en}"); }
+        if self.mode == Mode::Cs2 && b.cz == 0 { s += &format!("\nCS2：{en}"); }
         if b.e == 0 { s += "\n戰前既有建物"; } else if self.day < b.e as f32 {
             s += &format!("\n施工中 {:.0}%（{} 開工，預計 {} 完工）", ((self.day - b.s as f32) / (b.e - b.s).max(1) as f32 * 100.0).clamp(0.0, 100.0), date_of(b.s as f32), date_of(b.e as f32));
         } else { s += &format!("\n{} 開工・{} 竣工", date_of(b.s as f32), date_of(b.e as f32)); }
@@ -803,6 +804,7 @@ impl World {
                         if seg(ui, n, self.tod == t) { self.set_time(t); }
                     }
                     ui.separator();
+                    if seg(ui, "CS2 分區圖", self.zone_map) { self.zone_map = !self.zone_map; }
                     if seg(ui, "分區邊界", self.bounds || self.bound_sel.is_some()) { if self.bound_sel.is_some() { self.bound_sel = None; self.bounds = false; } else { self.bounds = !self.bounds; } }
                     if seg(ui, if self.left_tilt { "左鍵：轉視角" } else { "左鍵：平移" }, self.left_tilt) { self.left_tilt = !self.left_tilt; }
                     if seg(ui, &format!("解析度 {:.0}%{}", self.scale * 100.0, if self.auto_res { "（自動）" } else { "" }), false) {
@@ -992,7 +994,9 @@ impl World {
             ui.checkbox(&mut self.layers[2], "功能分區");
             if ui.checkbox(&mut self.bounds, "分區邊界").changed() { self.bound_sel = None; }
             ui.checkbox(&mut self.zone_line, "特區範圍");
+            ui.checkbox(&mut self.zone_map, "CS2 分區圖");
         });
+        if self.zone_map { cz_legend(ui); }
         if self.bound_sel.is_some() && ui.button("顯示全部分區").clicked() { self.bound_sel = None; self.bounds = true; }
         ui.add_space(8.0);
         eyebrow(ui, "軌道路線（點選開啟，未開啟時為純地圖）");
@@ -1160,7 +1164,9 @@ impl World {
             }
         }
         if !self.cs2_msg.is_empty() { ui.label(egui::RichText::new(&self.cs2_msg).size(11.5).color(ACCENT)); }
-        ui.label(egui::RichText::new("滑鼠停在建物上可看地塊 u 數與 CS2 分區。").size(11.5).color(MUTED));
+        ui.label(egui::RichText::new("滑鼠停在建物上可看 CS2 分區與地塊格數（1 格 = 8 m，地塊最深 6 格）。").size(11.5).color(MUTED));
+        ui.checkbox(&mut self.zone_map, "顯示 CS2 分區圖");
+        cz_legend(ui);
     }
 
     fn start_tour(&mut self, i: usize) {
@@ -1234,6 +1240,22 @@ fn pip(xs: &[f32], ys: &[f32], x: f32, y: f32) -> bool {
         j = i;
     }
     c
+}
+
+pub const CZ_NAMES: [&str; 13] = ["既有建物", "低密度住宅", "中密度排屋", "中密度住宅", "商住混合", "低租金住宅", "高密度住宅", "低密度商業", "高密度商業", "低密度辦公", "高密度辦公", "工業", "服務設施"];
+const CZ_COLS: [(u8, u8, u8); 13] = [(158, 158, 158), (178, 224, 128), (140, 204, 102), (92, 178, 82), (77, 158, 122), (128, 158, 64), (41, 122, 51), (115, 184, 250), (36, 102, 209), (184, 158, 224), (117, 82, 199), (245, 184, 56), (224, 102, 107)];
+fn cz_legend(ui: &mut egui::Ui) {
+    egui::Grid::new("czleg").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        for (i, n) in CZ_NAMES.iter().enumerate().skip(1) {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(12.0, 12.0), Sense::hover());
+                let c = CZ_COLS[i];
+                ui.painter().rect_filled(r, 2.0, Color32::from_rgb(c.0, c.1, c.2));
+                ui.label(egui::RichText::new(*n).size(11.5));
+            });
+            if i % 2 == 0 { ui.end_row(); }
+        }
+    });
 }
 
 fn district_name(story: &Value, id: &str) -> String {

@@ -193,10 +193,11 @@ struct BOut {
   @location(2) uv: vec2<f32>,
   @location(3) @interpolate(flat) m: vec4<u32>,
   @location(4) @interpolate(flat) prog: f32,
+  @location(5) @interpolate(flat) cz: u32,
 };
 @vertex
 fn vs_bld(@location(0) p: vec3<f32>, @location(1) n: vec4<f32>, @location(2) uv: vec2<f32>, @location(3) m: vec4<u32>, @location(4) days: vec4<u32>, @location(5) base: f32) -> BOut {
-  var o: BOut; o.n = n.xyz; o.uv = uv; o.m = m;
+  var o: BOut; o.n = n.xyz; o.uv = uv; o.m = m; o.cz = days.w;
   let day = G.day.x;
   let s = f32(days.x); let e = f32(days.y); let dd = f32(days.z);
   var prog = 1.0;
@@ -294,6 +295,20 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     emis = vec3<f32>(0.9, 0.95, 1.0) * night * 0.5;
   } else if (i.m.w == 2u) {
     base = mix(base, G.conc.rgb, 0.35);   // 女兒牆、屋頂機房
+  } else if (i.m.w == 5u) {
+    // 霓虹招牌與屋頂看板：白天為彩色面板，夜間發光
+    var nc = array<vec3<f32>, 5>(vec3<f32>(1.0, 0.18, 0.62), vec3<f32>(0.1, 0.85, 1.0), vec3<f32>(1.0, 0.6, 0.12), vec3<f32>(0.62, 0.32, 1.0), vec3<f32>(0.95, 0.95, 0.3));
+    let c_ = to_lin(nc[pal % 5u]);
+    let stripe = 0.75 + 0.25 * step(0.5, fract(i.w.y * 0.35));
+    base = c_ * stripe;
+    emis = c_ * (0.12 + night * 2.4) * stripe;
+  }
+  // CS2 分區圖：依分區上色（住宅綠、商業藍、辦公紫、工業黃、服務紅）
+  if (G.day.z > 0.5) {
+    var zc = array<vec3<f32>, 13>(vec3<f32>(0.62, 0.62, 0.62), vec3<f32>(0.70, 0.88, 0.50), vec3<f32>(0.55, 0.80, 0.40), vec3<f32>(0.36, 0.70, 0.32), vec3<f32>(0.30, 0.62, 0.48), vec3<f32>(0.50, 0.62, 0.25), vec3<f32>(0.16, 0.48, 0.20),
+      vec3<f32>(0.45, 0.72, 0.98), vec3<f32>(0.14, 0.40, 0.82), vec3<f32>(0.72, 0.62, 0.88), vec3<f32>(0.46, 0.32, 0.78), vec3<f32>(0.96, 0.72, 0.22), vec3<f32>(0.88, 0.40, 0.42));
+    base = to_lin(zc[min(i.cz, 12u)]) * (0.85 + 0.15 * select(0.0, 1.0, roof));
+    emis = vec3<f32>(0.0);
   }
   if (i.prog < 1.0) {
     // 施工中：灰色鷹架、綠色防塵網格、頂部塔吊色
