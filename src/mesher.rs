@@ -506,12 +506,15 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
     let mut idx: Vec<u32> = vec![];
     let f = |o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
     for s in 0..n {
-        let o = s * 24;
-        if o + 24 > b.len() { break; }
+        let o = s * 28;
+        if o + 28 > b.len() { break; }
         let (k, br) = (b[o] as usize, b[o + 1]);
         let day = u16::from_le_bytes([b[o + 2], b[o + 3]]);
         let dd = u16::from_le_bytes([b[o + 4], b[o + 5]]);
-        let (ax, ay, bx, by) = (f(o + 8), f(o + 12), f(o + 16), f(o + 20));
+        // 立體層級：端點離地高度（分米）；+1 高架約 9 m、+2 上層高架約 17 m，匝道沿線內插
+        let za = i16::from_le_bytes([b[o + 6], b[o + 7]]) as f32 / 10.0;
+        let zb = i16::from_le_bytes([b[o + 8], b[o + 9]]) as f32 / 10.0;
+        let (ax, ay, bx, by) = (f(o + 12), f(o + 16), f(o + 20), f(o + 24));
         let l = ((bx - ax).powi(2) + (by - ay).powi(2)).sqrt();
         if l < 0.5 { continue; }
         let w = sh.widths.get(k).copied().unwrap_or(12.0) / 2.0;
@@ -530,7 +533,8 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
                 let h = sh.hg.at(x as f64, y as f64);
                 if br > 0 || h < 0.3 { h.max(0.0) + if br > 0 { 9.0 } else { 0.6 } } else { h + 0.6 }
             };
-            let (h0, h1) = (hh(x0, y0) + lift, hh(x1, y1) + lift);
+            let (z0, z1) = (za + (zb - za) * t0, za + (zb - za) * t1);
+            let (h0, h1) = (hh(x0, y0) + lift + z0, hh(x1, y1) + lift + z1);
             let base = v.len() as u32;
             let meta = [k as u16, day, dd, 0];
             let col = [c[0], c[1], c[2], 255];
@@ -538,6 +542,29 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
                 v.push(RVertex { pos: [x, h, -yy], col, meta });
             }
             idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            // 高架：橋面側板與橋墩（每 50 m）
+            if z0 > 3.0 || z1 > 3.0 {
+                let side = [(c[0] as f32 * 0.7) as u8, (c[1] as f32 * 0.7) as u8, (c[2] as f32 * 0.7) as u8, 255];
+                for sg in [1.0f32, -1.0] {
+                    let b2 = v.len() as u32;
+                    for (x, yy, h) in [(x0 + nx * sg, y0 + ny * sg, h0), (x1 + nx * sg, y1 + ny * sg, h1), (x1 + nx * sg, y1 + ny * sg, h1 - 1.6), (x0 + nx * sg, y0 + ny * sg, h0 - 1.6)] {
+                        v.push(RVertex { pos: [x, h, -yy], col: side, meta });
+                    }
+                    idx.extend_from_slice(&[b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3]);
+                }
+                let pier_d = (ax - x0).hypot(ay - y0);
+                if (pier_d / 50.0).fract() < (25.0 / 50.0) && q % 2 == 0 && z0 > 3.0 {
+                    let g0 = sh.hg.at(x0 as f64, y0 as f64).max(-2.0);
+                    let pw = 1.4f32;
+                    for (dx, dy) in [(pw, 0.0f32), (0.0, pw)] {
+                        let b2 = v.len() as u32;
+                        for (x, yy, h) in [(x0 - dx, y0 - dy, g0), (x0 + dx, y0 + dy, g0), (x0 + dx, y0 + dy, h0 - 1.6), (x0 - dx, y0 - dy, h0 - 1.6)] {
+                            v.push(RVertex { pos: [x, h, -yy], col: side, meta });
+                        }
+                        idx.extend_from_slice(&[b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3]);
+                    }
+                }
+            }
         }
     }
     MeshData { verts: bytemuck::cast_slice(&v).to_vec(), indices: idx }

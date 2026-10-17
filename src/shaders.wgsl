@@ -274,6 +274,15 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     let wc = mix(vec3<f32>(1.0, 0.6, 0.2), vec3<f32>(0.4, 0.7, 1.0), step(0.7, hash3(vec3<f32>(fl, floor(cx) * 1.3, va))));
     lit = mix(0.3, lit, aa);
     emis = win * lit * wc * night * 1.1 + shop * night * vec3<f32>(1.0, 0.75, 0.45) * 0.8;
+    // 霓虹招牌（Cyberpunk 風）：商住混合與部分辦公、工廠在夜間有洋紅／青色燈帶
+    let neon_on = (ti == 4 || (ti == 6 && pal % 3u == 0u) || ((ti == 0 || ti == 1) && pal % 4u == 1u));
+    if (neon_on && night > 0.0) {
+      var nc = array<vec3<f32>, 4>(vec3<f32>(1.0, 0.15, 0.6), vec3<f32>(0.1, 0.9, 1.0), vec3<f32>(1.0, 0.55, 0.1), vec3<f32>(0.6, 0.3, 1.0));
+      let c_ = nc[pal % 4u];
+      let band = step(0.82, fract(i.uv.y / fh)) * step(fl, 3.0) * step(1.0, fl);
+      let vert = step(0.93, fract(i.uv.x / 23.0)) * step(i.uv.y, 30.0);
+      emis = emis + c_ * (band + vert * 0.8) * night * 2.2 * aa;
+    }
     base = base * (0.78 + 0.22 * clamp(i.uv.y / 8.0, 0.0, 1.0));
   } else if (roof) {
     base = base * 0.9;
@@ -348,29 +357,41 @@ fn vs_line(@location(0) p: vec3<f32>, @location(1) perp: vec2<f32>, @location(2)
   var o: LOut;
   let g = u32(sdkg.w);
   let vis = group_vis(g);
+  // 類別：0 捷運、1 輕軌、2 高鐵、3 幹線公車、4 接駁公車；kind：0 地上、1 地下
+  let cat = floor(sdkg.z / 10.0 + 0.01);
+  let kind = sdkg.z - cat * 10.0;
   var wpx = select(6.0, 8.0, G.ground_col.w > 0.5 && G.fog_col.w > 0.5);
   var wmin = 5.0;
-  if (sdkg.z > 2.5) { wpx = 2.5; wmin = 2.0; }   // 公車：細線
+  if (cat > 0.5 && cat < 1.5) { wpx = 4.5; wmin = 3.5; }
+  else if (cat > 1.5 && cat < 2.5) { wpx = 5.0; wmin = 4.0; }
+  else if (cat > 2.5 && cat < 3.5) { wpx = 3.4; wmin = 2.6; }
+  else if (cat > 3.5) { wpx = 2.2; wmin = 1.8; }
   let w = max(wmin, wpx * G.cs2b.w) * 0.5;
   let q = p + vec3<f32>(perp.x, 0.0, perp.y) * sdkg.x * w;
   o.pos = G.view_proj * vec4<f32>(q, 1.0);
   o.pos.z = o.pos.z - 0.0004 * o.pos.w;
   o.c = vec4<f32>(c.rgb, vis);
-  o.sdk = vec4<f32>(sdkg.x, sdkg.y, sdkg.z, wpx);
+  o.sdk = vec4<f32>(sdkg.x, sdkg.y, kind + cat * 10.0, wpx);
   if (vis < 0.1 || G.sky_col.w < c.a * 255.0 + 1900.0) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
 }
 @fragment
 fn fs_line(i: LOut) -> @location(0) vec4<f32> {
   let a = abs(i.sdk.x); let edge = 1.0 - 1.6 / max(i.sdk.w, 3.0);
+  let cat = floor(i.sdk.z / 10.0 + 0.01); let kind = i.sdk.z - cat * 10.0;
   let night = G.sun_dir.w;
   let casing = mix(vec3<f32>(1.0), vec3<f32>(0.06, 0.09, 0.13), night);
   var c = to_lin(i.c.rgb) * mix(1.0, 1.3, night);
-  if (i.sdk.z > 0.5 && i.sdk.z < 1.5) {
+  let unit = max(24.0, G.cs2b.w * 12.0);
+  if (kind > 0.5 && cat < 1.5) {
+    // 地下段：淡色＋中央虛線
     c = mix(c, to_lin(casing), 0.3);
-    if (a < 0.22 && fract(i.sdk.y / max(24.0, G.cs2b.w * 12.0)) < 0.5) { c = to_lin(casing); }
+    if (a < 0.22 && fract(i.sdk.y / unit) < 0.5) { c = to_lin(casing); }
   }
-  if (a > edge) { c = to_lin(casing); }
+  if (cat > 0.5 && cat < 1.5 && a < 0.3 && fract(i.sdk.y / (unit * 0.6)) < 0.35) { c = to_lin(casing); }      // 輕軌：短白點
+  if (cat > 1.5 && cat < 2.5 && a < 0.55 && fract(i.sdk.y / (unit * 0.5)) < 0.5) { c = to_lin(vec3<f32>(0.95)); }   // 高鐵：黑白相間（鐵道符號）
+  if (cat > 2.5 && cat < 3.5 && a < 0.25) { c = to_lin(casing); }                                                  // 幹線公車：中央白線
+  if (a > edge && cat < 3.5) { c = to_lin(casing); }
   let focus = i.c.a;
   c = mix(mix(to_lin(casing), vec3<f32>(0.5), 0.4), c, clamp(focus, 0.0, 1.0));
   return vec4<f32>(c, 1.0);

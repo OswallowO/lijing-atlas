@@ -78,6 +78,7 @@ pub struct World {
     speed: usize,
     tod: Tod,
     pub lines_on: HashSet<String>,
+    lines_hide: HashSet<String>,
     focus_line: Option<String>,
     sel: Sel,
     labels: Vec<Label>,
@@ -163,7 +164,7 @@ impl World {
         cam.pitch = 42f32.to_radians();
         cam.yaw = 18f32.to_radians();
         let mut w = World {
-            r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), focus_line: None, sel: Sel::None,
+            r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), lines_hide: HashSet::new(), focus_line: None, sel: Sel::None,
             labels: vec![], lms, keys: HashSet::new(), left_tilt: false, playing: false, play_t: 0.0, scale: 1.0, auto_res: true, fps: 0.0, fps_acc: (0.0, 0), frame_ms: 0.0,
             search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, side_w: 354.0, tl_open: true,
             cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], outlines: vec![], bounds: false, bound_sel: None, zone_line: false, d,
@@ -173,6 +174,7 @@ impl World {
         w.set_time(Tod::Day);
         if std::env::var("LIJING_BOUNDS").is_ok() { w.bounds = true; w.zone_line = true; }
         if std::env::var("LIJING_SIDE_CLOSED").is_ok() { w.side_open = false; }
+        if std::env::var("LIJING_TRANSIT").is_ok() { w.mode = Mode::Transit; }
         // 測試用：LIJING_VIEW=經度,緯度,距離,俯角,方位,年份；LIJING_INTERIOR=種類
         if let Ok(v) = std::env::var("LIJING_VIEW") {
             let a: Vec<f64> = v.split(',').filter_map(|x| x.parse().ok()).collect();
@@ -306,7 +308,8 @@ impl World {
     }
 
     fn line_on(&self, id: &str) -> bool {
-        if self.lines_on.is_empty() { matches!(self.mode, Mode::Transit | Mode::Overview) } else { self.lines_on.contains(id) }
+        // 運輸模式／總圖：預設全部顯示，點選切換隱藏；其他模式：預設純地圖，點選切換顯示
+        if matches!(self.mode, Mode::Transit | Mode::Overview) { !self.lines_hide.contains(id) } else { self.lines_on.contains(id) }
     }
 
     pub fn set_time(&mut self, t: Tod) {
@@ -919,22 +922,45 @@ impl World {
         self.side_w = resp.response.rect.width().max(200.0);
     }
 
+    fn set_line(&mut self, id: &str, v: bool) {
+        if matches!(self.mode, Mode::Transit | Mode::Overview) { if v { self.lines_hide.remove(id); } else { self.lines_hide.insert(id.to_string()); } }
+        else if v { self.lines_on.insert(id.to_string()); } else { self.lines_on.remove(id); }
+    }
+
     fn line_chips(&mut self, ui: &mut egui::Ui) {
-        let lines: Vec<(String, String, String)> = self.d.scene_meta.lines.iter().map(|l| (l.id.clone(), l.name.clone(), l.color.clone())).collect();
-        egui::Grid::new("linechips").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
-            for (k, (id, name, c)) in lines.iter().enumerate() {
-                let on = self.lines_on.contains(id);
-                let col = hex32(c);
-                let txt = egui::RichText::new(format!("{}  {}", if id == "HSR" { "高鐵" } else { id }, name.split_whitespace().last().unwrap_or(""))).size(12.0).color(if on { Color32::WHITE } else { INK });
-                if ui.add(egui::Button::new(txt).fill(if on { col } else { Color32::WHITE }).stroke(Stroke::new(1.5, col)).min_size(Vec2::new(150.0, 26.0))).clicked() {
-                    if on { self.lines_on.remove(id); } else { self.lines_on.insert(id.clone()); }
+        // 依類別分組：捷運、輕軌、高鐵、幹線公車、接駁公車
+        let cats: [(&str, &[&str]); 5] = [("捷運", &["metro", "express"]), ("輕軌", &["lrt"]), ("高鐵", &["hsr"]), ("幹線公車（BRT）", &["brt"]), ("接駁公車", &["feeder", "bus"])];
+        for (ci, (cname, types)) in cats.iter().enumerate() {
+            let lines: Vec<(String, String, String)> = self.d.scene_meta.lines.iter().filter(|l| types.contains(&l.kind.as_str())).map(|l| (l.id.clone(), l.name.clone(), l.color.clone())).collect();
+            if lines.is_empty() { continue; }
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(*cname).size(12.5).strong());
+                ui.label(egui::RichText::new(format!("{} 條", lines.len())).size(11.0).color(MUTED));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("全開／全關").clicked() {
+                        let any = lines.iter().any(|(id, _, _)| self.line_on(id));
+                        for (id, _, _) in &lines { self.set_line(id, !any); }
+                    }
+                });
+            });
+            egui::Grid::new(format!("linechips{ci}")).num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
+                for (k, (id, name, c)) in lines.iter().enumerate() {
+                    let on = self.line_on(id);
+                    let col = hex32(c);
+                    let label = if id == "HSR" { "高鐵".to_string() } else if id.starts_with("BUS") { "公車".to_string() } else { id.clone() };
+                    let txt = egui::RichText::new(format!("{}  {}", label, name.split_whitespace().last().unwrap_or(""))).size(12.0).color(if on { Color32::WHITE } else { INK });
+                    if ui.add(egui::Button::new(txt).fill(if on { col } else { Color32::WHITE }).stroke(Stroke::new(1.5, col)).min_size(Vec2::new(150.0, 26.0))).clicked() {
+                        self.set_line(id, !on);
+                    }
+                    if k % 2 == 1 { ui.end_row(); }
                 }
-                if k % 2 == 1 { ui.end_row(); }
-            }
-        });
+            });
+            ui.add_space(4.0);
+        }
         ui.horizontal(|ui| {
-            if ui.button("全部顯示").clicked() { self.lines_on = self.d.scene_meta.lines.iter().map(|l| l.id.clone()).collect(); }
-            if ui.button("全部隱藏").clicked() { self.lines_on.clear(); }
+            let ids: Vec<String> = self.d.scene_meta.lines.iter().map(|l| l.id.clone()).collect();
+            if ui.button("全部顯示").clicked() { for id in &ids { self.set_line(id, true); } }
+            if ui.button("全部隱藏").clicked() { for id in &ids { self.set_line(id, false); } }
         });
     }
 
@@ -1052,7 +1078,7 @@ impl World {
     }
 
     fn transit_body(&mut self, ui: &mut egui::Ui) {
-        eyebrow(ui, "顯示路線（未選時顯示全部）");
+        eyebrow(ui, "顯示路線（點選切換開關）");
         self.line_chips(ui);
         ui.add_space(8.0);
         let lines = self.d.scene_meta.lines.clone();
@@ -1077,7 +1103,11 @@ impl World {
         }
         ui.add_space(6.0);
         ui.checkbox(&mut self.layers[3], "顯示人口＋就業密度熱區");
-        ui.label(egui::RichText::new("線形沿主要道路走廊佈設（如台北捷運板南線埋設於忠孝東路下方），最小曲線半徑：捷運 300 m、機場快線 450 m、輕軌 120 m。實色為高架／跨海橋，淺色＋中央虛線為地下段與隧道。").size(11.5).color(MUTED));
+        eyebrow(ui, "立體層級");
+        for (lv, t) in [("+2", "上層高架：跨越高架道路或高鐵的捷運、快速道路交叉匝道（約 17–20 m）"), ("+1", "高架：快速道路、高鐵、外圍捷運（約 9–12 m）"), ("0", "地面：一般道路、幹線與接駁公車"), ("-1", "地下：市心與高密度區的捷運（淺色＋中央虛線）"), ("-2", "深層地下：與其他地下線交叉的區段")] {
+            ui.horizontal(|ui| { ui.label(egui::RichText::new(lv).monospace().strong()); ui.label(egui::RichText::new(t).size(11.5).color(MUTED)); });
+        }
+        ui.label(egui::RichText::new("規劃方針：首爾級密度（車站 800 m 內涵蓋約 93% 的人口與就業）、東京式直通（每線 14–28 km、穿越市心）、站距市心約 700 m／住宅區約 1 km／外圍約 1.4 km；公車分幹線（BRT，站距約 500 m）與接駁（站距約 300 m）兩層。").size(11.5).color(MUTED));
     }
 
     fn contour_body(&mut self, ui: &mut egui::Ui) {
