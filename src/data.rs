@@ -86,10 +86,20 @@ pub struct InteriorTag {
 #[derive(Deserialize, Clone)]
 pub struct InteriorLevel {
     pub name: String,
+    #[serde(default)]
+    pub zone: String,
     pub y: f32,
     pub h: f32,
-    pub off: usize,
-    pub count: usize,
+    #[serde(default)]
+    pub w: f32,
+    #[serde(default)]
+    pub d: f32,
+    #[serde(default)]
+    pub zoff: f32,
+    #[serde(default)]
+    pub core: Option<[f32; 2]>,
+    /// 幾何索引（標準層共用同一段頂點，樓層本地座標）
+    pub g: usize,
     pub tags: Vec<InteriorTag>,
 }
 #[derive(Deserialize, Clone)]
@@ -97,7 +107,10 @@ pub struct InteriorMeta {
     pub kind: String,
     pub note: String,
     pub size: f32,
+    #[serde(default)]
+    pub floors: usize,
     pub levels: Vec<InteriorLevel>,
+    pub geoms: Vec<[usize; 2]>,
 }
 
 pub struct Data {

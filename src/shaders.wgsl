@@ -18,6 +18,7 @@ struct Globals {
   type_col: array<vec4<f32>, 12>,
   groups: array<vec4<f32>, 16>, // 群組可見度（地標／路線）
   day: vec4<f32>,               // x 目前日（2014-01-01 起算）、y 時間（秒）
+  inv_vp: mat4x4<f32>,          // 天空：螢幕座標反推視線
 };
 @group(0) @binding(0) var<uniform> G: Globals;
 @group(0) @binding(1) var h_tex: texture_2d<f32>;
@@ -410,4 +411,42 @@ fn fs_line(i: LOut) -> @location(0) vec4<f32> {
   let focus = i.c.a;
   c = mix(mix(to_lin(casing), vec3<f32>(0.5), 0.4), c, clamp(focus, 0.0, 1.0));
   return vec4<f32>(c, 1.0);
+}
+
+// ---------- 天空：地平線霧色 → 天頂漸層、太陽光暈、夜間星空與月暈 ----------
+struct SOut { @builtin(position) pos: vec4<f32>, @location(0) ndc: vec2<f32> };
+@vertex
+fn vs_sky(@builtin(vertex_index) vi: u32) -> SOut {
+  var o: SOut;
+  let p = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u)) * 2.0 - 1.0;
+  o.pos = vec4<f32>(p, 1.0, 1.0);
+  o.ndc = p;
+  return o;
+}
+@fragment
+fn fs_sky(i: SOut) -> @location(0) vec4<f32> {
+  if (G.ground_col.w > 0.5) { return vec4<f32>(G.fog_col.rgb, 1.0); }
+  let w = G.inv_vp * vec4<f32>(i.ndc, 1.0, 1.0);
+  let dir = normalize(w.xyz / w.w - G.cam_pos.xyz);
+  let night = G.sun_dir.w;
+  let e = dir.y;
+  let zen = G.sky_col.rgb * mix(vec3<f32>(0.5, 0.68, 1.0), vec3<f32>(0.42, 0.5, 0.8), night);
+  var col = mix(G.fog_col.rgb, zen, pow(clamp(e, 0.0, 1.0), 0.42));
+  let sd = normalize(G.sun_dir.xyz);
+  let s = max(dot(dir, sd), 0.0);
+  let up = smoothstep(-0.04, 0.03, e);
+  // 太陽（白天）／月亮（夜間）
+  let disc = pow(s, 1800.0) * 6.0 + pow(s, 90.0) * 0.35 + pow(s, 8.0) * 0.18;
+  col += G.sun_col.rgb * disc * up * mix(1.0, 0.35, night);
+  // 低角度太陽：地平線暖色暈
+  let low = 1.0 - smoothstep(0.05, 0.5, sd.y);
+  col += G.sun_col.rgb * pow(s, 3.0) * low * 0.35 * (1.0 - night) * (1.0 - smoothstep(0.0, 0.35, abs(e)));
+  // 星空
+  if (night > 0.3 && e > 0.02) {
+    let q = floor(dir * 420.0);
+    let h = hash3(q);
+    let tw = 0.6 + 0.4 * sin(G.day.y * 2.0 + h * 50.0);
+    col += vec3<f32>(0.9, 0.95, 1.0) * step(0.9975, h) * night * smoothstep(0.02, 0.25, e) * tw * 0.9;
+  }
+  return vec4<f32>(col, 1.0);
 }

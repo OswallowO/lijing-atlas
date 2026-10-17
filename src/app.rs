@@ -112,7 +112,19 @@ pub struct World {
     bound_sel: Option<usize>, // 只顯示某一分區
     zone_line: bool,         // 顯示特區範圍
     zone_map: bool,          // CS2 分區圖
+    hour: f32,               // 時刻 0–24（連續光線）
+    cycle: bool,             // 日夜循環播放
+    bookmarks: Vec<Bookmark>,
+    book_open: bool,
+    minimap: bool,
+    mini: Option<(egui::TextureHandle, [f32; 4])>, // 小地圖貼圖與範圍（xmin, xmax, ymin, ymax，在地座標）
+    shot: Option<u32>,       // 待執行的截圖倍率
+    toast: Option<(String, f32)>,
 }
+
+/// 視角書籤（存在資料夾的 bookmarks.json）
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct Bookmark { name: String, x: f32, z: f32, dist: f32, yaw: f32, pitch: f32 }
 
 /// 地面外框（分區、特區、地標基地）
 struct Outline { pts: Vec<Vec3>, color: Color32, kind: u8, idx: usize, key: String }
@@ -165,7 +177,7 @@ impl World {
         cam.pitch = 42f32.to_radians();
         cam.yaw = 18f32.to_radians();
         let mut w = World {
-            r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, lines_on: HashSet::new(), lines_hide: HashSet::new(), focus_line: None, sel: Sel::None,
+            r, cam, target: None, tex: None, mode: Mode::ThreeD, year: 2025, day: END_DAY, speed: 1, tod: Tod::Day, hour: 12.0, cycle: false, bookmarks: vec![], book_open: false, minimap: true, mini: None, shot: None, toast: None, lines_on: HashSet::new(), lines_hide: HashSet::new(), focus_line: None, sel: Sel::None,
             labels: vec![], lms, keys: HashSet::new(), left_tilt: false, playing: false, play_t: 0.0, scale: 1.0, auto_res: true, fps: 0.0, fps_acc: (0.0, 0), frame_ms: 0.0,
             search: String::new(), tour: None, measure: None, hover: None, hover_t: 0.0, last_mouse: Pos2::ZERO, side_open: true, side_w: 354.0, tl_open: true,
             cs2: (119.773, 25.500, 57344.0, 0.0), cs2_msg: String::new(), hm_sea: 40.0, interior: None, orbit: false, layers: [true, true, true, true], outlines: vec![], bounds: false, bound_sel: None, zone_line: false, zone_map: false, d,
@@ -173,6 +185,8 @@ impl World {
         w.build_labels();
         w.build_outlines();
         w.set_time(Tod::Day);
+        if let Ok(s) = std::fs::read(w.d.dir.join("bookmarks.json")) { w.bookmarks = serde_json::from_slice(&s).unwrap_or_default(); }
+        if let Ok(h) = std::env::var("LIJING_HOUR") { if let Ok(h) = h.parse() { w.set_hour(h); } }
         if std::env::var("LIJING_BOUNDS").is_ok() { w.bounds = true; w.zone_line = true; }
         if std::env::var("LIJING_SIDE_CLOSED").is_ok() { w.side_open = false; }
         if std::env::var("LIJING_TRANSIT").is_ok() { w.mode = Mode::Transit; }
@@ -315,18 +329,120 @@ impl World {
     }
 
     pub fn set_time(&mut self, t: Tod) {
-        self.tod = t;
-        let lp = light_preset(t);
+        self.set_hour(match t { Tod::Dawn => 6.4, Tod::Day => 12.0, Tod::Dusk => 17.9, Tod::Night => 22.0 });
+    }
+
+    /// 連續時刻：在晨、日、暮、夜四組光線之間內插；白天太陽方位與仰角依時刻計算。
+    pub fn set_hour(&mut self, h: f32) {
+        let h = h.rem_euclid(24.0);
+        self.hour = h;
+        let keys: [(f32, Tod); 9] = [(0.0, Tod::Night), (4.8, Tod::Night), (6.3, Tod::Dawn), (8.6, Tod::Day), (12.0, Tod::Day), (15.6, Tod::Day), (17.8, Tod::Dusk), (19.3, Tod::Night), (24.0, Tod::Night)];
+        let k = keys.windows(2).position(|w| h >= w[0].0 && h <= w[1].0).unwrap_or(0);
+        let (a, b) = (keys[k], keys[k + 1]);
+        let f = if b.0 > a.0 { (h - a.0) / (b.0 - a.0) } else { 0.0 };
+        let f = f * f * (3.0 - 2.0 * f);
+        let (la, lb) = (light_preset(a.1), light_preset(b.1));
+        let mix = |x: &str, y: &str, w: f32| { let (p, q) = (lin4(x, 0.0), lin4(y, 0.0)); [p[0] + (q[0] - p[0]) * f, p[1] + (q[1] - p[1]) * f, p[2] + (q[2] - p[2]) * f, w] };
+        let night = la.night + (lb.night - la.night) * f;
+        // 太陽：6 時東升、12 時南中、18 時西落；夜間改用月光方向
+        let az = (90.0 + (h - 6.0) * 15.0).to_radians();
+        let el = ((h - 6.0) / 12.0 * std::f32::consts::PI).sin() * 64.0;
+        let sun = Vec3::new(az.sin() * el.to_radians().cos().max(0.0), el.max(3.0).to_radians().sin(), -az.cos() * el.to_radians().cos());
+        let moon = light_preset(Tod::Night).sun_dir.normalize();
+        let sd = (sun.normalize() * (1.0 - night) + moon * night).normalize();
         let g = &mut self.r.globals;
-        let sd = lp.sun_dir.normalize();
-        g.sun_dir = [sd.x, sd.y, sd.z, lp.night];
-        g.sun_col = lin4(lp.sun, g.sun_col[3]);
-        g.sky_col = lin4(lp.sky, g.sky_col[3]);
-        g.ground_col = lin4(lp.ground, g.ground_col[3]);
-        g.fog_col = lin4(lp.fog, g.fog_col[3]);
-        g.conc = lin4(lp.conc, 0.0);
-        g.glass = lin4(lp.glass, 0.0);
-        for (i, c) in lp.types.iter().enumerate() { g.type_col[i] = lin4(c, 0.0); }
+        g.sun_dir = [sd.x, sd.y, sd.z, night];
+        g.sun_col = mix(la.sun, lb.sun, g.sun_col[3]);
+        g.sky_col = mix(la.sky, lb.sky, g.sky_col[3]);
+        g.ground_col = mix(la.ground, lb.ground, g.ground_col[3]);
+        g.fog_col = mix(la.fog, lb.fog, g.fog_col[3]);
+        g.conc = mix(la.conc, lb.conc, 0.0);
+        g.glass = mix(la.glass, lb.glass, 0.0);
+        for i in 0..12 { g.type_col[i] = mix(la.types[i], lb.types[i], 0.0); }
+        self.tod = if night > 0.55 { Tod::Night } else if (5.0..9.0).contains(&h) { Tod::Dawn } else if (16.0..20.0).contains(&h) { Tod::Dusk } else { Tod::Day };
+    }
+
+    fn save_bookmarks(&self) {
+        let _ = std::fs::write(self.d.dir.join("bookmarks.json"), serde_json::to_vec_pretty(&self.bookmarks).unwrap_or_default());
+    }
+
+    /// 小地圖：由海岸距離場裁出本島範圍，陸地上色並疊上建物密度。
+    fn mini_tex(&mut self, ctx: &egui::Context) {
+        if self.mini.is_some() { return; }
+        let (w, h, c) = (&self.d.coast.0, &self.d.coast.1, &self.d.coast.2);
+        let tb = self.r.globals.tb;
+        let (mut x0, mut x1, mut y0, mut y1) = (*w, 0, *h, 0);
+        let step = 2;
+        for y in (0..*h).step_by(step) { for x in (0..*w).step_by(step) { if c[y * w + x] > 140 { x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y); } } }
+        if x1 <= x0 || y1 <= y0 { return; }
+        let pad = 20;
+        let (x0, y0, x1, y1) = (x0.saturating_sub(pad), y0.saturating_sub(pad), (x1 + pad).min(w - 1), (y1 + pad).min(h - 1));
+        let (cw, ch) = (x1 - x0, y1 - y0);
+        let sc = (cw.max(ch) as f32 / 360.0).max(1.0);
+        let (ow, oh) = ((cw as f32 / sc) as usize, (ch as f32 / sc) as usize);
+        let mut img = egui::ColorImage::new([ow, oh], vec![Color32::TRANSPARENT; ow * oh]);
+        for y in 0..oh { for x in 0..ow {
+            let (sx, sy) = (x0 + (x as f32 * sc) as usize, y0 + (y as f32 * sc) as usize);
+            let v = c[sy * w + sx] as i32;
+            img.pixels[y * ow + x] = if v > 132 { Color32::from_rgb(0xe9, 0xe6, 0xdc) } else if v > 124 { Color32::from_rgb(0x9a, 0xa8, 0xb2) } else { Color32::from_rgb(0xc9, 0xdb, 0xe6) };
+        } }
+        let fx = |px: usize| tb[0] + (tb[1] - tb[0]) * px as f32 / *w as f32;
+        let fy = |py: usize| tb[3] - (tb[3] - tb[2]) * py as f32 / *h as f32;
+        let tex = ctx.load_texture("minimap", img, egui::TextureOptions::LINEAR);
+        self.mini = Some((tex, [fx(x0), fx(x1), fy(y1), fy(y0)]));
+    }
+
+    fn minimap(&mut self, ctx: &egui::Context) {
+        self.mini_tex(ctx);
+        let Some((tex, b)) = self.mini.clone() else { return };
+        let sz = tex.size_vec2();
+        let side = if self.side_open { self.side_w + 24.0 } else { 56.0 };
+        let disp = Vec2::new(170.0, 170.0 * sz.y / sz.x);
+        egui::Area::new(egui::Id::new("minimap")).anchor(Align2::RIGHT_BOTTOM, Vec2::new(-side, -76.0)).show(ctx, |ui| {
+            panel_frame().show(ui, |ui| {
+                let (r, resp) = ui.allocate_exact_size(disp, Sense::click_and_drag());
+                let p = ui.painter_at(r);
+                p.image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                let to = |x: f32, y: f32| Pos2::new(r.min.x + (x - b[0]) / (b[1] - b[0]) * r.width(), r.min.y + (b[3] - y) / (b[3] - b[2]) * r.height());
+                // 視野範圍：畫面四角投到地面
+                let (vw, vh) = (self.cam.vw, self.cam.vh);
+                let gy = self.cam.target.y;
+                let mut quad = vec![];
+                for (sx, sy) in [(0.0, vh), (vw, vh), (vw, 0.0), (0.0, 0.0)] {
+                    let (o, d) = self.cam.ray(sx, sy);
+                    let t = if d.y < -1e-3 { ((gy - o.y) / d.y).min(self.cam.dist * 6.0) } else { self.cam.dist * 6.0 };
+                    let q = o + d * t;
+                    quad.push(to(q.x, -q.z));
+                }
+                p.add(egui::Shape::convex_polygon(quad.clone(), Color32::from_rgba_unmultiplied(13, 127, 134, 40), Stroke::new(1.2, ACCENT)));
+                let c = to(self.cam.target.x, -self.cam.target.z);
+                p.circle_filled(c, 3.5, WARN);
+                if (resp.clicked() || resp.dragged()) && resp.interact_pointer_pos().is_some() {
+                    let q = resp.interact_pointer_pos().unwrap();
+                    let x = b[0] + (q.x - r.min.x) / r.width() * (b[1] - b[0]);
+                    let y = b[3] - (q.y - r.min.y) / r.height() * (b[3] - b[2]);
+                    if resp.dragged() { self.cam.anim = None; self.cam.target.x = x; self.cam.target.z = -y; } else { self.cam.fly_to(x, y, None, None, None, 0.8); }
+                }
+                resp.on_hover_text("小地圖：點擊或拖曳移動視角");
+            });
+        });
+    }
+
+    fn take_shot(&mut self, rs: &egui_wgpu::RenderState, scale: u32) {
+        let Some(t) = &self.target else { return };
+        let (w, h) = ((t.size.0 as f32 / self.scale) as u32 * scale, (t.size.1 as f32 / self.scale) as u32 * scale);
+        let fog = self.r.globals.fog_col;
+        let show_lines = self.d.scene_meta.lines.iter().any(|l| self.line_on(&l.id));
+        let vp = self.cam.vp;
+        let img = self.r.capture(&rs.device, &rs.queue, w, h, &vp, self.cam.pos, [fog[0] as f64, fog[1] as f64, fog[2] as f64], show_lines);
+        let name = format!("麗京_{}_{:02}{:02}.png", self.year, self.hour as u32, ((self.hour.fract()) * 60.0) as u32);
+        let path = if let Ok(p) = std::env::var("LIJING_SHOT") { Some(std::path::PathBuf::from(p)) } else {
+            let pics = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).map(|h| std::path::PathBuf::from(h).join("Pictures")).unwrap_or_default();
+            rfd::FileDialog::new().set_directory(pics).set_file_name(&name).add_filter("PNG", &["png"]).save_file()
+        };
+        if let Some(p) = path {
+            self.toast = Some(match img.save(&p) { Ok(_) => (format!("已儲存截圖 {}×{}：{}", w, h, p.display()), 5.0), Err(e) => (format!("截圖儲存失敗：{e}"), 5.0) });
+        }
     }
 
     fn set_mode(&mut self, m: Mode) {
@@ -375,6 +491,7 @@ impl World {
         let c = &self.cam;
         let g = &mut self.r.globals;
         g.view_proj = c.vp.to_cols_array_2d();
+        g.inv_vp = c.vp.inverse().to_cols_array_2d();
         g.cam_pos = [c.pos.x, c.pos.y, c.pos.z, t];
         let top = ((c.pitch - 1.0) / 0.5).clamp(0.0, 1.0);
         g.sun_col[3] = 1.0 / (c.dist * 1.2 + 10000.0) * (1.0 - 0.65 * top);
@@ -477,6 +594,10 @@ impl World {
             let pressed: Vec<(egui::Key, Mode)> = [(K::Num1, Mode::Plan), (K::Num2, Mode::ThreeD), (K::Num3, Mode::Contour), (K::Num4, Mode::Transit), (K::Num5, Mode::Cs2), (K::Num6, Mode::Overview)].into_iter().filter(|(k, _)| self.keys.remove(k)).collect();
             for (_, m) in pressed { self.set_mode(m); }
             if ctx.input(|i| i.key_pressed(K::T)) { self.left_tilt = !self.left_tilt; }
+            if ctx.input(|i| i.key_pressed(K::B)) { self.book_open = !self.book_open; }
+            if ctx.input(|i| i.key_pressed(K::P)) { self.shot = Some(2); }
+            if ctx.input(|i| i.key_pressed(K::N)) { self.minimap = !self.minimap; }
+            if ctx.input(|i| i.key_pressed(K::L)) { self.cycle = !self.cycle; }
             if ctx.input(|i| i.key_pressed(K::M)) { self.measure = if self.measure.is_some() { None } else { Some(vec![]) }; }
             if ctx.input(|i| i.key_pressed(K::Escape)) { self.measure = None; self.tour = None; self.orbit = false; self.interior = None; }
         }
@@ -594,6 +715,10 @@ impl World {
         }
         self.year = 2014 + (self.day / 365.25) as i32;
         if self.orbit { self.cam.yaw += dt * 0.18; }
+        if self.cycle { self.set_hour(self.hour + dt * 0.6); }
+        // 測試用：設定 LIJING_SHOT 時於啟動 20 秒後自動截圖一次
+        static SHOT_ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if t > 20.0 && std::env::var("LIJING_SHOT").is_ok() && !SHOT_ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) { self.shot = Some(2); }
         // 3D 視圖：全畫面
         let full = ctx.content_rect();
         let ppp = ctx.pixels_per_point();
@@ -604,6 +729,7 @@ impl World {
             let px = ((full.width() * ppp * self.scale) as u32, (full.height() * ppp * self.scale) as u32);
             let t0 = std::time::Instant::now();
             self.render(rs, px, t);
+            if let Some(sc) = self.shot.take() { self.take_shot(rs, sc); }
             self.frame_ms = self.frame_ms * 0.9 + t0.elapsed().as_secs_f32() * 1000.0 * 0.1;
         }
         let painter = ui.painter_at(full);
@@ -620,6 +746,15 @@ impl World {
         self.bottom_bar(&ctx);
         if self.tl_open { self.timeline(&ctx); } else { self.timeline_tab(&ctx); }
         self.side_panel(&ctx);
+        if self.minimap && self.tour.is_none() { self.minimap(&ctx); }
+        if self.book_open { self.bookmark_panel(&ctx); }
+        if let Some((m, left)) = &mut self.toast {
+            *left -= dt;
+            let m = m.clone();
+            if *left <= 0.0 { self.toast = None; } else {
+                egui::Area::new(egui::Id::new("toast")).anchor(Align2::CENTER_TOP, Vec2::new(0.0, 74.0)).order(egui::Order::Foreground).show(&ctx, |ui| { panel_frame().show(ui, |ui| { ui.label(egui::RichText::new(m).size(12.5)); }); });
+            }
+        }
         if let Some(i) = self.tour { self.tour_caption(&ctx, i); }
         if let Some((p, s)) = &self.hover {
             egui::Area::new(egui::Id::new("tip")).fixed_pos(*p + Vec2::new(14.0, 14.0)).order(egui::Order::Tooltip).interactable(false).show(&ctx, |ui| {
@@ -787,7 +922,49 @@ impl World {
                     }
                     ui.separator();
                     if tool_button(ui, "量測", "M", self.measure.is_some()).clicked() { self.measure = if self.measure.is_some() { None } else { Some(vec![]) }; }
+                    if tool_button(ui, "書籤", "B", self.book_open).clicked() { self.book_open = !self.book_open; }
+                    if tool_button(ui, "截圖", "P", false).on_hover_text("以兩倍解析度輸出目前 3D 畫面（PNG）").clicked() { self.shot = Some(2); }
+                    if tool_button(ui, "小地圖", "N", self.minimap).clicked() { self.minimap = !self.minimap; }
                 });
+            });
+        });
+    }
+
+    fn bookmark_panel(&mut self, ctx: &egui::Context) {
+        egui::Area::new(egui::Id::new("books")).anchor(Align2::LEFT_CENTER, Vec2::new(96.0, 0.0)).show(ctx, |ui| {
+            panel_frame().show(ui, |ui| {
+                ui.set_width(220.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("視角書籤").strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if ui.small_button("×").clicked() { self.book_open = false; } });
+                });
+                if ui.add(egui::Button::new(egui::RichText::new("＋ 儲存目前視角").color(Color32::WHITE)).fill(ACCENT)).clicked() {
+                    let (x, y) = (self.cam.target.x, -self.cam.target.z);
+                    // 以最近的地標或分區命名
+                    let near = self.lms.iter().map(|l| { let (lx, ly) = self.d.geo.to_local(l.at.0, l.at.1); (((lx as f32 - x).powi(2) + (ly as f32 - y).powi(2)).sqrt(), l.name.clone()) }).min_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+                    let name = match near { Some((d, n)) if d < 2500.0 => format!("{n}附近"), _ => format!("視角 {}", self.bookmarks.len() + 1) };
+                    self.bookmarks.push(Bookmark { name, x: self.cam.target.x, z: self.cam.target.z, dist: self.cam.dist, yaw: self.cam.yaw, pitch: self.cam.pitch });
+                    self.save_bookmarks();
+                }
+                ui.add_space(4.0);
+                let mut del = None;
+                let mut go = None;
+                egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                    for (i, b) in self.bookmarks.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.button("前往").clicked() { go = Some(i); }
+                            ui.add(egui::TextEdit::singleline(&mut b.name).desired_width(120.0));
+                            if ui.small_button("刪除").clicked() { del = Some(i); }
+                        });
+                    }
+                });
+                if self.bookmarks.is_empty() { ui.label(egui::RichText::new("尚無書籤。移動到想要的視角後按「儲存」。").size(11.5).color(MUTED)); }
+                if let Some(i) = go {
+                    let b = self.bookmarks[i].clone();
+                    self.cam.fly_to(b.x, -b.z, Some(b.dist), Some(-b.yaw.to_degrees()), Some(b.pitch.to_degrees()), 1.4);
+                    self.save_bookmarks();
+                }
+                if let Some(i) = del { self.bookmarks.remove(i); self.save_bookmarks(); }
             });
         });
     }
@@ -802,8 +979,13 @@ impl World {
                     ui.separator();
                     ui.label(egui::RichText::new("光線").size(11.0).color(MUTED));
                     for (t, n) in [(Tod::Dawn, "晨"), (Tod::Day, "日"), (Tod::Dusk, "暮"), (Tod::Night, "夜")] {
-                        if seg(ui, n, self.tod == t) { self.set_time(t); }
+                        if seg(ui, n, self.tod == t && !self.cycle) { self.cycle = false; self.set_time(t); }
                     }
+                    ui.spacing_mut().slider_width = 96.0;
+                    let mut h = self.hour;
+                    if ui.add(egui::Slider::new(&mut h, 0.0..=24.0).show_value(false)).on_hover_text("時刻：拖曳連續調整光線").changed() { self.cycle = false; self.set_hour(h); }
+                    ui.label(egui::RichText::new(format!("{:02}:{:02}", self.hour as u32 % 24, (self.hour.fract() * 60.0) as u32)).size(12.0).monospace());
+                    if seg(ui, if self.cycle { "❚❚ 循環" } else { "▶ 循環" }, self.cycle) { self.cycle = !self.cycle; }
                     ui.separator();
                     if seg(ui, "CS2 分區圖", self.zone_map) { self.zone_map = !self.zone_map; }
                     if seg(ui, "分區邊界", self.bounds || self.bound_sel.is_some()) { if self.bound_sel.is_some() { self.bound_sel = None; self.bounds = false; } else { self.bounds = !self.bounds; } }
@@ -1055,7 +1237,7 @@ impl World {
             }
             if ui.button("俯視").clicked() { let (x, y) = self.d.geo.to_local(at.0, at.1); self.cam.fly_to(x as f32, y as f32, Some(900.0), Some(0.0), Some(89.9), 1.4); }
             if let Some(k) = kind {
-                if ui.button("內部剖面").clicked() { self.interior = Some(InteriorView::new(k, &format!("{name}・內部剖面"), None)); }
+                if ui.button("內部剖面").clicked() { self.interior = Some(InteriorView::new(&k, &format!("{name}・內部剖面"), None)); }
             }
         });
     }

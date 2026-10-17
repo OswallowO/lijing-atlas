@@ -31,6 +31,7 @@ pub struct Globals {
     pub type_col: [[f32; 4]; 12],
     pub groups: [[f32; 4]; 16],
     pub day: [f32; 4], // 目前日（2014-01-01 起算）、施工動畫時間
+    pub inv_vp: [[f32; 4]; 4],
 }
 
 struct GpuMesh {
@@ -93,6 +94,7 @@ pub struct Renderer {
     p_road: wgpu::RenderPipeline,
     pub p_mesh: wgpu::RenderPipeline,
     p_line: wgpu::RenderPipeline,
+    p_sky: wgpu::RenderPipeline,
     grids: Vec<(wgpu::Buffer, wgpu::Buffer, u32)>,
     inst: Vec<wgpu::Buffer>,
     inst_n: Vec<u32>,
@@ -304,6 +306,7 @@ impl Renderer {
         let p_bld = mk("vs_bld", "fs_bld", &[Some(vb(std::mem::size_of::<BVertex>() as u64, wgpu::VertexStepMode::Vertex, &B_A))], None, true, 0);
         let p_road = mk("vs_road", "fs_road", &[Some(vb(std::mem::size_of::<RVertex>() as u64, wgpu::VertexStepMode::Vertex, &R_A))], None, true, -2);
         let p_mesh = mk("vs_mesh", "fs_mesh", &[Some(vb(std::mem::size_of::<MeshVertex>() as u64, wgpu::VertexStepMode::Vertex, &M_A))], None, true, 0);
+        let p_sky = mk("vs_sky", "fs_sky", &[], None, false, 0);
         let p_line = mk("vs_line", "fs_line", &[Some(vb(std::mem::size_of::<LVertex>() as u64, wgpu::VertexStepMode::Vertex, &L_A))], None, true, 0);
         // 地形格網
         let mut grids = vec![];
@@ -349,7 +352,7 @@ impl Renderer {
             }
         };
         Renderer {
-            globals, gbuf, bgl, bg, p_terrain, p_water, p_bld, p_road, p_mesh, p_line, grids, inst, inst_n: vec![0; LODS.len()], tiles, water,
+            globals, gbuf, bgl, bg, p_terrain, p_water, p_bld, p_road, p_mesh, p_line, p_sky, grids, inst, inst_n: vec![0; LODS.len()], tiles, water,
             scene_n: sv.len() as u32, scene_vb, lines, chunks, tx, rx, pending: 0, frame_no: 0, quality: 1.0, tris: 0, calls: 0, sets_on: [true, true, true], aux,
         }
     }
@@ -441,6 +444,9 @@ impl Renderer {
         let mut tris = 0u64;
         let mut calls = 0u32;
         rp.set_bind_group(0, &self.bg, &[]);
+        // 天空
+        rp.set_pipeline(&self.p_sky);
+        rp.draw(0..3, 0..1);
         // 地形
         rp.set_pipeline(&self.p_terrain);
         for (i, (v, ib, n)) in self.grids.iter().enumerate() {
@@ -502,6 +508,40 @@ impl Renderer {
         rp.draw(0..6, 0..1);
         self.tris = tris;
         self.calls = calls + 1;
+    }
+
+    /// 高解析度截圖：以 scale 倍解析度重新繪製目前畫面並讀回（sRGB RGBA）。
+    pub fn capture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, vp: &Mat4, cam: Vec3, clear: [f64; 3], show_lines: bool) -> image::RgbaImage {
+        let w = w.min(device.limits().max_texture_dimension_2d);
+        let h = h.min(device.limits().max_texture_dimension_2d);
+        let t = Target::new(device, w, h);
+        let vh = self.globals.tex[3];
+        self.globals.tex[3] = h as f32;
+        self.write_globals(queue);
+        let mut enc = device.create_command_encoder(&Default::default());
+        self.draw(&mut enc, &t, vp, cam, clear, show_lines, true);
+        let row = (w * 4 + 255) / 256 * 256;
+        let buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("shot"), size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo { texture: &t.color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        queue.submit([enc.finish()]);
+        let sl = buf.slice(..);
+        sl.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let data = sl.get_mapped_range().expect("map");
+        let mut img = image::RgbaImage::new(w, h);
+        for y in 0..h {
+            let src = &data[(y * row) as usize..(y * row + w * 4) as usize];
+            img.as_mut()[(y * w * 4) as usize..((y + 1) * w * 4) as usize].copy_from_slice(src);
+        }
+        drop(data);
+        buf.unmap();
+        self.globals.tex[3] = vh;
+        self.write_globals(queue);
+        img
     }
 
     /// 另一組全域參數（剖面視窗用）
