@@ -390,12 +390,23 @@ impl World {
                     if lab[ny * gw + nx] == 0 && c[ny * step * w + nx * step] > 140 { lab[ny * gw + nx] = id; stack.push((nx, ny)); }
                 }
             }
-            if n > best.0 { best = (n, id); }
+            let _ = n;
         } }
+        // 取包含中央站的陸地（最大陸塊是西側的大陸海岸，不是本島）
+        let (zx, zy) = self.d.geo.to_local(119.7846, 25.5325);
+        let zpx = (((zx as f32 - tb[0]) / (tb[1] - tb[0]) * *w as f32) as usize / step).min(gw - 1);
+        let zpy = (((tb[3] - zy as f32) / (tb[3] - tb[2]) * *h as f32) as usize / step).min(gh - 1);
+        best.1 = lab[zpy * gw + zpx];
+        if best.1 == 0 { return; }
         for sy in 0..gh { for sx in 0..gw { if lab[sy * gw + sx] == best.1 { let (x, y) = (sx * step, sy * step); x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y); } } }
         if x1 <= x0 || y1 <= y0 { return; }
-        let pad = 20;
-        let (x0, y0, x1, y1) = (x0.saturating_sub(pad), y0.saturating_sub(pad), (x1 + pad).min(w - 1), (y1 + pad).min(h - 1));
+        // 正方形：較短邊往兩側擴張
+        let pad = 30;
+        let side = (x1 - x0).max(y1 - y0) + pad * 2;
+        let (cxp, cyp) = ((x0 + x1) / 2, (y0 + y1) / 2);
+        let x0 = cxp.saturating_sub(side / 2).min(w - 1 - side.min(w - 1));
+        let y0 = cyp.saturating_sub(side / 2).min(h - 1 - side.min(h - 1));
+        let (x1, y1) = ((x0 + side).min(w - 1), (y0 + side).min(h - 1));
         let (cw, ch) = (x1 - x0, y1 - y0);
         let sc = (cw.max(ch) as f32 / 360.0).max(1.0);
         let (ow, oh) = ((cw as f32 / sc) as usize, (ch as f32 / sc) as usize);
@@ -415,7 +426,7 @@ impl World {
         self.mini_tex(ctx);
         let Some((tex, b)) = self.mini.clone() else { return };
         let sz = tex.size_vec2();
-        let k = (150.0 / sz.x).min(150.0 / sz.y); let disp = sz * k;
+        let disp = Vec2::splat(170.0);
         egui::Area::new(egui::Id::new("minimap")).anchor(Align2::LEFT_BOTTOM, Vec2::new(12.0, -84.0)).show(ctx, |ui| {
             panel_frame().show(ui, |ui| {
                 let (r, resp) = ui.allocate_exact_size(disp, Sense::click_and_drag());
