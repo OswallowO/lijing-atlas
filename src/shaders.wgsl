@@ -142,7 +142,7 @@ fn fs_terrain(i: TOut) -> @location(0) vec4<f32> {
   if (night > 0.0) {
     let lum = dot(base, vec3<f32>(0.3, 0.5, 0.2));
     let urban = smoothstep(0.62, 0.78, lum) * step(0.5, i.h);
-    col = mix(col, col * 0.18 + vec3<f32>(0.002, 0.003, 0.006), night) + night * urban * vec3<f32>(0.02, 0.012, 0.004);
+    col = mix(col, col * 0.18 + vec3<f32>(0.002, 0.003, 0.006), night) + night * urban * vec3<f32>(0.05, 0.028, 0.009);
   }
   if (G.cs2b.y > 0.5) { col = cs2_apply(col, cf); }
   col = fog(col, length(i.w - G.cam_pos.xyz));
@@ -266,16 +266,16 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     let shop = (1.0 - step(1.0, fl)) * step(0.12, fy) * step(fy, 0.92) * step(0.06, fx) * step(fx, 0.94) * select(0.0, 1.0, ti == 4 || ti == 1 || ti == 0 || ti == 8);
     let band = select(0.0, 1.0, (fl % 5.0) == 4.0 && ti != 3 && pat != 2u);
     win = max(win * (1.0 - band * 0.8), shop);
-    win = mix(0.3 * step(1.0, fl + 0.5), win, aa);
+    win = mix(0.4 * step(1.0, fl + 0.5), win, aa);
     var glassy = 0.22; if (ti == 8) { glassy = 0.55; } else if (ti == 0 || ti == 1) { glassy = 0.35; }
     if (officeish && pat == 2u) { glassy = 0.7; }
     if (ti == 10 || ti == 11) { glassy = 0.12; }
     base = mix(base, glass, win * glassy);
     base = base * (1.0 - band * 0.12 * aa) * (1.0 - dark * aa);
-    var lit = step(0.52, hash3(vec3<f32>(floor(cx), fl, floor(i.w.x * 0.02) + floor(i.w.z * 0.02))));
-    let wc = mix(vec3<f32>(1.0, 0.6, 0.2), vec3<f32>(0.4, 0.7, 1.0), step(0.7, hash3(vec3<f32>(fl, floor(cx) * 1.3, va))));
-    lit = mix(0.3, lit, aa);
-    emis = win * lit * wc * night * 1.1 + shop * night * vec3<f32>(1.0, 0.75, 0.45) * 0.8;
+    var lit = step(0.42, hash3(vec3<f32>(floor(cx), fl, floor(i.w.x * 0.02) + floor(i.w.z * 0.02))));
+    let wc = mix(vec3<f32>(1.0, 0.66, 0.3), vec3<f32>(0.62, 0.8, 1.0), step(0.72, hash3(vec3<f32>(fl, floor(cx) * 1.3, va))));
+    lit = mix(0.12 + 1.1 * step(0.55, hash3(vec3<f32>(floor(i.w.x / 18.0), floor(i.uv.y / 12.0), floor(i.w.z / 18.0)))), lit, aa);
+    emis = win * lit * wc * night * 1.7 + shop * night * vec3<f32>(1.0, 0.72, 0.4) * 1.4;
     // 霓虹招牌（Cyberpunk 風）：商住混合與部分辦公、工廠在夜間有洋紅／青色燈帶
     let neon_on = (ti == 4 || (ti == 6 && pal % 3u == 0u) || ((ti == 0 || ti == 1) && pal % 4u == 1u));
     if (neon_on && night > 0.0) {
@@ -288,6 +288,7 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     base = base * (0.78 + 0.22 * clamp(i.uv.y / 8.0, 0.0, 1.0));
   } else if (roof) {
     base = base * 0.9;
+    emis = vec3<f32>(1.0, 0.72, 0.42) * night * 0.1 * step(0.35, hash3(vec3<f32>(floor(i.w.x * 0.05), floor(i.w.z * 0.05), va)));
   } else if (i.m.w == 3u) {
     base = pal_roof(pal, ti == 6);                     // 斜屋頂瓦／金屬屋面
     if (ti == 6) { base = base * (0.9 + 0.1 * step(0.5, fract(i.w.x * 0.5 + i.w.z * 0.5))); }
@@ -304,10 +305,10 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     base = c_ * stripe;
     emis = c_ * (0.12 + night * 2.4) * stripe;
   }
-  // CS2 分區圖：依分區上色（住宅綠、商業藍、辦公紫、工業黃、服務紅）
+  // CS2 分區圖：依分區上色（住宅綠、商業藍、辦公洋紅、工業黃、服務紅）
   if (G.day.z > 0.5) {
     var zc = array<vec3<f32>, 13>(vec3<f32>(0.62, 0.62, 0.62), vec3<f32>(0.70, 0.88, 0.50), vec3<f32>(0.55, 0.80, 0.40), vec3<f32>(0.36, 0.70, 0.32), vec3<f32>(0.30, 0.62, 0.48), vec3<f32>(0.50, 0.62, 0.25), vec3<f32>(0.16, 0.48, 0.20),
-      vec3<f32>(0.45, 0.72, 0.98), vec3<f32>(0.14, 0.40, 0.82), vec3<f32>(0.72, 0.62, 0.88), vec3<f32>(0.46, 0.32, 0.78), vec3<f32>(0.96, 0.72, 0.22), vec3<f32>(0.88, 0.40, 0.42));
+      vec3<f32>(0.50, 0.78, 1.00), vec3<f32>(0.08, 0.32, 0.86), vec3<f32>(0.90, 0.66, 0.90), vec3<f32>(0.66, 0.14, 0.66), vec3<f32>(0.96, 0.72, 0.22), vec3<f32>(0.88, 0.40, 0.42));
     base = to_lin(zc[min(i.cz, 12u)]) * (0.85 + 0.15 * select(0.0, 1.0, roof));
     emis = vec3<f32>(0.0);
   }
@@ -319,18 +320,30 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
     emis = vec3<f32>(0.0);
   }
   var col = light(base, n);
-  col = mix(col, col * 0.22, night) + emis;
+  col = mix(col, col * 0.22, night);
   col = mix(col, vec3<f32>(0.85), G.fog_col.w * 0.55);
-  col = fog(col, length(i.w - G.cam_pos.xyz));
+  let bd = length(i.w - G.cam_pos.xyz);
+  let bf = clamp(1.0 - exp(-pow(G.sun_col.w * bd, 2.0)), 0.0, 1.0);
+  col = fog(col, bd) + emis * (1.0 - bf * 0.55);   // 夜間燈火穿透霧氣（空中俯瞰的城市燈海）
   return vec4<f32>(col, 1.0);
 }
 
 // ---------------- 道路 ----------------
-struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32> };
+struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32>, @location(2) lat: f32, @location(3) @interpolate(flat) km: vec2<u32> };
 @vertex
 fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec4<u32>) -> ROut {
-  var o: ROut; o.w = p; o.c = c.rgb;
-  o.pos = G.view_proj * vec4<f32>(p, 1.0);
+  var o: ROut; o.c = c.rgb; o.lat = c.a; o.km = vec2<u32>(m.x, m.w);
+  var q = p;
+  // 夜間：遠處道路至少保持約 1 像素寬，城市路網的燈光才不會因為次像素而消失
+  let night = G.sun_dir.w;
+  if (night > 0.01 && m.x <= 5u && abs(c.a - 0.5) > 0.3) {
+    let a = f32(m.w) / 65535.0 * 3.14159265;
+    let perp = vec3<f32>(sin(a), 0.0, cos(a));
+    let px = length(p - G.cam_pos.xyz) * 0.83 / max(G.tex.w, 1.0);
+    q = q + perp * sign(c.a - 0.5) * px * 0.55 * night;
+  }
+  o.w = q;
+  o.pos = G.view_proj * vec4<f32>(q, 1.0);
   // 通車日之前、拆除日之後不顯示（戰前舊路在新路網動工前拆除）
   if ((m.y > 0u && G.day.x < f32(m.y)) || (m.z > 0u && G.day.x >= f32(m.z))) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
@@ -339,9 +352,24 @@ fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m:
 fn fs_road(i: ROut) -> @location(0) vec4<f32> {
   var col = light(to_lin(i.c), vec3<f32>(0.0, 1.0, 0.0));
   let night = G.sun_dir.w;
-  col = mix(col, col * 0.3 + vec3<f32>(0.03, 0.022, 0.01), night);
+  col = mix(col, col * 0.3 + vec3<f32>(0.01, 0.008, 0.006), night);
   col = mix(col, vec3<f32>(0.85), G.fog_col.w * 0.5);
-  col = fog(col, length(i.w - G.cam_pos.xyz));
+  let dist = length(i.w - G.cam_pos.xyz);
+  var emis = vec3<f32>(0.0);
+  if (night > 0.01 && G.fog_col.w < 0.1) {
+    // 夜間路燈：快速道路白色 LED、幹道與次幹道鈉燈橘色、巷道較暗；沿路緣每 32 m 一盞
+    let k = i.km.x;
+    var lc = vec3<f32>(1.0, 0.52, 0.16); var kb = 0.5;
+    if (k <= 1u) { lc = vec3<f32>(0.95, 0.88, 0.72); kb = 1.5; } else if (k <= 3u) { kb = 1.25; } else if (k == 4u) { kb = 0.85; } else if (k >= 7u) { kb = 0.18; }
+    let a = f32(i.km.y) / 65535.0 * 3.14159265;
+    let along = (i.w.x * cos(a) - i.w.z * sin(a)) / 32.0;
+    let aa = clamp(1.0 - fwidth(along) * 1.5, 0.0, 1.0);
+    let lamp = mix(0.45, exp(-pow(fract(along) - 0.5, 2.0) * 40.0), aa);
+    let edge = mix(0.6, smoothstep(0.35, 0.95, abs(i.lat * 2.0 - 1.0)), aa);
+    emis = lc * kb * night * (0.25 + 1.6 * edge * lamp);
+  }
+  let f = 1.0 - exp(-pow(G.sun_col.w * dist, 2.0));
+  col = fog(col, dist) + emis * (1.0 - clamp(f, 0.0, 1.0) * 0.55);
   return vec4<f32>(col, 1.0);
 }
 
@@ -441,6 +469,8 @@ fn fs_sky(i: SOut) -> @location(0) vec4<f32> {
   // 低角度太陽：地平線暖色暈
   let low = 1.0 - smoothstep(0.05, 0.5, sd.y);
   col += G.sun_col.rgb * pow(s, 3.0) * low * 0.35 * (1.0 - night) * (1.0 - smoothstep(0.0, 0.35, abs(e)));
+  // 城市光害：夜間地平線的暖色光穹
+  col += vec3<f32>(0.07, 0.04, 0.018) * night * (1.0 - smoothstep(0.0, 0.22, abs(e)));
   // 星空
   if (night > 0.3 && e > 0.02) {
     let q = floor(dir * 420.0);

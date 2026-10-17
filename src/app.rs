@@ -372,8 +372,27 @@ impl World {
         let (w, h, c) = (&self.d.coast.0, &self.d.coast.1, &self.d.coast.2);
         let tb = self.r.globals.tb;
         let (mut x0, mut x1, mut y0, mut y1) = (*w, 0, *h, 0);
-        let step = 2;
-        for y in (0..*h).step_by(step) { for x in (0..*w).step_by(step) { if c[y * w + x] > 140 { x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y); } } }
+        // 只取本島（最大的陸地連通區）
+        let step = 4;
+        let (gw, gh) = (w / step, h / step);
+        let mut lab = vec![0u32; gw * gh];
+        let mut best = (0usize, 0u32);
+        let mut id = 0u32;
+        for sy in 0..gh { for sx in 0..gw {
+            if lab[sy * gw + sx] != 0 || c[sy * step * w + sx * step] <= 140 { continue; }
+            id += 1; let mut stack = vec![(sx, sy)]; lab[sy * gw + sx] = id; let mut n = 0usize;
+            while let Some((x, y)) = stack.pop() {
+                n += 1;
+                for (dx, dy) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                    let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                    if nx < 0 || ny < 0 || nx >= gw as i32 || ny >= gh as i32 { continue; }
+                    let (nx, ny) = (nx as usize, ny as usize);
+                    if lab[ny * gw + nx] == 0 && c[ny * step * w + nx * step] > 140 { lab[ny * gw + nx] = id; stack.push((nx, ny)); }
+                }
+            }
+            if n > best.0 { best = (n, id); }
+        } }
+        for sy in 0..gh { for sx in 0..gw { if lab[sy * gw + sx] == best.1 { let (x, y) = (sx * step, sy * step); x0 = x0.min(x); x1 = x1.max(x); y0 = y0.min(y); y1 = y1.max(y); } } }
         if x1 <= x0 || y1 <= y0 { return; }
         let pad = 20;
         let (x0, y0, x1, y1) = (x0.saturating_sub(pad), y0.saturating_sub(pad), (x1 + pad).min(w - 1), (y1 + pad).min(h - 1));
@@ -384,7 +403,7 @@ impl World {
         for y in 0..oh { for x in 0..ow {
             let (sx, sy) = (x0 + (x as f32 * sc) as usize, y0 + (y as f32 * sc) as usize);
             let v = c[sy * w + sx] as i32;
-            img.pixels[y * ow + x] = if v > 132 { Color32::from_rgb(0xe9, 0xe6, 0xdc) } else if v > 124 { Color32::from_rgb(0x9a, 0xa8, 0xb2) } else { Color32::from_rgb(0xc9, 0xdb, 0xe6) };
+            img.pixels[y * ow + x] = if v > 132 { Color32::from_rgb(0xf4, 0xf0, 0xe4) } else if v > 124 { Color32::from_rgb(0x6f, 0x86, 0x96) } else { Color32::from_rgb(0x8f, 0xb4, 0xcc) };
         } }
         let fx = |px: usize| tb[0] + (tb[1] - tb[0]) * px as f32 / *w as f32;
         let fy = |py: usize| tb[3] - (tb[3] - tb[2]) * py as f32 / *h as f32;
@@ -396,9 +415,8 @@ impl World {
         self.mini_tex(ctx);
         let Some((tex, b)) = self.mini.clone() else { return };
         let sz = tex.size_vec2();
-        let side = if self.side_open { self.side_w + 24.0 } else { 56.0 };
-        let disp = Vec2::new(170.0, 170.0 * sz.y / sz.x);
-        egui::Area::new(egui::Id::new("minimap")).anchor(Align2::RIGHT_BOTTOM, Vec2::new(-side, -76.0)).show(ctx, |ui| {
+        let k = (150.0 / sz.x).min(150.0 / sz.y); let disp = sz * k;
+        egui::Area::new(egui::Id::new("minimap")).anchor(Align2::LEFT_BOTTOM, Vec2::new(12.0, -84.0)).show(ctx, |ui| {
             panel_frame().show(ui, |ui| {
                 let (r, resp) = ui.allocate_exact_size(disp, Sense::click_and_drag());
                 let p = ui.painter_at(r);
@@ -914,7 +932,7 @@ impl World {
     }
 
     fn tool_bar(&mut self, ctx: &egui::Context) {
-        egui::Area::new(egui::Id::new("tools")).anchor(Align2::LEFT_CENTER, Vec2::new(12.0, 0.0)).show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("tools")).anchor(Align2::LEFT_TOP, Vec2::new(12.0, 84.0)).show(ctx, |ui| {
             panel_frame().show(ui, |ui| {
                 ui.vertical(|ui| {
                     for (m, n, k) in [(Mode::Overview, "總圖", "6"), (Mode::Plan, "平面", "1"), (Mode::ThreeD, "立體", "2"), (Mode::Contour, "等高線", "3"), (Mode::Transit, "運輸", "4"), (Mode::Cs2, "CS2 規劃", "5")] {
@@ -1061,7 +1079,7 @@ impl World {
             });
         });
         if t < 0.002 { return; }
-        let resp = egui::Area::new(egui::Id::new("side")).anchor(Align2::RIGHT_TOP, Vec2::new(-12.0 + off, 72.0)).show(ctx, |ui| {
+        let resp = egui::Area::new(egui::Id::new("side")).constrain(false).anchor(Align2::RIGHT_TOP, Vec2::new(-12.0 + off, 72.0)).show(ctx, |ui| {
             panel_frame().show(ui, |ui| {
                 ui.set_width(330.0);
                 ui.set_max_height(h);
@@ -1104,7 +1122,7 @@ impl World {
                 });
             });
         });
-        self.side_w = resp.response.rect.width().max(200.0);
+        if t > 0.999 { self.side_w = resp.response.rect.width().max(200.0); }
     }
 
     fn set_line(&mut self, id: &str, v: bool) {
@@ -1426,7 +1444,7 @@ fn pip(xs: &[f32], ys: &[f32], x: f32, y: f32) -> bool {
 }
 
 pub const CZ_NAMES: [&str; 13] = ["既有建物", "低密度住宅", "中密度排屋", "中密度住宅", "商住混合", "低租金住宅", "高密度住宅", "低密度商業", "高密度商業", "低密度辦公", "高密度辦公", "工業", "服務設施"];
-const CZ_COLS: [(u8, u8, u8); 13] = [(158, 158, 158), (178, 224, 128), (140, 204, 102), (92, 178, 82), (77, 158, 122), (128, 158, 64), (41, 122, 51), (115, 184, 250), (36, 102, 209), (184, 158, 224), (117, 82, 199), (245, 184, 56), (224, 102, 107)];
+const CZ_COLS: [(u8, u8, u8); 13] = [(158, 158, 158), (178, 224, 128), (140, 204, 102), (92, 178, 82), (77, 158, 122), (128, 158, 64), (41, 122, 51), (128, 199, 255), (20, 82, 219), (230, 168, 230), (168, 36, 168), (245, 184, 56), (224, 102, 107)];
 fn cz_legend(ui: &mut egui::Ui) {
     egui::Grid::new("czleg").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
         for (i, n) in CZ_NAMES.iter().enumerate().skip(1) {

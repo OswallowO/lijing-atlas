@@ -565,15 +565,16 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
             let (z0, z1) = (za + (zb - za) * t0, za + (zb - za) * t1);
             let (h0, h1) = (hh(x0, y0) + lift + z0, hh(x1, y1) + lift + z1);
             let base = v.len() as u32;
-            let meta = [k as u16, day, dd, 0];
-            let col = [c[0], c[1], c[2], 255];
-            for (x, yy, h) in [(x0 + nx, y0 + ny, h0), (x0 - nx, y0 - ny, h0), (x1 - nx, y1 - ny, h1), (x1 + nx, y1 + ny, h1)] {
-                v.push(RVertex { pos: [x, h, -yy], col, meta });
+            // meta[3]：道路方向角（夜間路燈間距用）；col.a：橫向位置 0／255（路緣燈帶用）
+            let ang = (uy.atan2(ux).rem_euclid(std::f32::consts::PI) / std::f32::consts::PI * 65535.0) as u16;
+            let meta = [k as u16, day, dd, ang];
+            for (x, yy, h, a) in [(x0 + nx, y0 + ny, h0, 255u8), (x0 - nx, y0 - ny, h0, 0), (x1 - nx, y1 - ny, h1, 0), (x1 + nx, y1 + ny, h1, 255)] {
+                v.push(RVertex { pos: [x, h, -yy], col: [c[0], c[1], c[2], a], meta });
             }
             idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
             // 高架：橋面側板與橋墩（每 50 m）
             if z0 > 3.0 || z1 > 3.0 {
-                let side = [(c[0] as f32 * 0.7) as u8, (c[1] as f32 * 0.7) as u8, (c[2] as f32 * 0.7) as u8, 255];
+                let side = [(c[0] as f32 * 0.7) as u8, (c[1] as f32 * 0.7) as u8, (c[2] as f32 * 0.7) as u8, 128];
                 for sg in [1.0f32, -1.0] {
                     let b2 = v.len() as u32;
                     for (x, yy, h) in [(x0 + nx * sg, y0 + ny * sg, h0), (x1 + nx * sg, y1 + ny * sg, h1), (x1 + nx * sg, y1 + ny * sg, h1 - 1.6), (x0 + nx * sg, y0 + ny * sg, h0 - 1.6)] {
