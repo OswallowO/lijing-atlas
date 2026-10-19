@@ -563,6 +563,7 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
                 if br > 0 || h < 0.3 { h.max(0.0) + if br > 0 { 9.0 } else { 0.6 } } else { h + 0.6 }
             };
             let (z0, z1) = (za + (zb - za) * t0, za + (zb - za) * t1);
+            if z0 < -12.0 && z1 < -12.0 { continue; }   // 隧道段：整段不建網格（避免逐頂點隱藏造成的拉伸破圖）
             let (h0, h1) = (hh(x0, y0) + lift + z0, hh(x1, y1) + lift + z1);
             let base = v.len() as u32;
             // meta[3]：道路方向角（夜間路燈間距用）；col.a：橫向位置 0／255（路緣燈帶用）

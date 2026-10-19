@@ -344,10 +344,9 @@ fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m:
   }
   o.w = q;
   o.pos = G.view_proj * vec4<f32>(q, 1.0);
-  // 地面以下：隧道（低於地面 12 m）不顯示；下沉式掘割把深度往鏡頭拉近，讓路面與擋土牆透過地表畫出來
+  // 地面以下：隧道段在網格階段已略過；下沉式掘割把深度往鏡頭拉近，讓路面與擋土牆透過地表畫出來
   let th = H(uv_of(q.x, q.z));
-  if (th > -5.0 && q.y < th - 12.0) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
-  else if (q.y < th - 0.5) {
+  if (q.y < th - 0.5 && q.y > th - 13.0) {
     o.sk = clamp((th - q.y) / 7.0, 0.0, 1.0);
     let q2 = q + normalize(G.cam_pos.xyz - q) * (th - q.y + 3.0);
     let c2 = G.view_proj * vec4<f32>(q2, 1.0);
