@@ -572,6 +572,19 @@ fn build_roads(sh: &Shared, b: &[u8], n: usize, _ox: f32, _oy: f32) -> MeshData 
                 v.push(RVertex { pos: [x, h, -yy], col: [c[0], c[1], c[2], a], meta });
             }
             idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+            // 下沉式（掘割）：兩側擋土牆，從地面降到路面；隧道段（-12 m 以下）由著色器隱藏
+            if (z0 < -1.0 || z1 < -1.0) && (z0 > -12.0 || z1 > -12.0) {
+                let wall = [168u8, 170, 166, 128];
+                for sg in [1.0f32, -1.0] {
+                    let (wx0, wy0, wx1, wy1) = (x0 + nx * sg * 1.08, y0 + ny * sg * 1.08, x1 + nx * sg * 1.08, y1 + ny * sg * 1.08);
+                    let g0 = sh.hg.at(wx0 as f64, wy0 as f64).max(0.0) + 0.9; let g1 = sh.hg.at(wx1 as f64, wy1 as f64).max(0.0) + 0.9;
+                    let b2 = v.len() as u32;
+                    for (x, yy, h) in [(wx0, wy0, g0), (wx1, wy1, g1), (wx1, wy1, h1), (wx0, wy0, h0)] {
+                        v.push(RVertex { pos: [x, h, -yy], col: wall, meta });
+                    }
+                    idx.extend_from_slice(&[b2, b2 + 1, b2 + 2, b2, b2 + 2, b2 + 3]);
+                }
+            }
             // 高架：橋面側板與橋墩（每 50 m）
             if z0 > 3.0 || z1 > 3.0 {
                 let side = [(c[0] as f32 * 0.7) as u8, (c[1] as f32 * 0.7) as u8, (c[2] as f32 * 0.7) as u8, 128];

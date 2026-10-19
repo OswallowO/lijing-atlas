@@ -329,10 +329,10 @@ fn fs_bld(i: BOut) -> @location(0) vec4<f32> {
 }
 
 // ---------------- 道路 ----------------
-struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32>, @location(2) lat: f32, @location(3) @interpolate(flat) km: vec2<u32> };
+struct ROut { @builtin(position) pos: vec4<f32>, @location(0) w: vec3<f32>, @location(1) c: vec3<f32>, @location(2) lat: f32, @location(3) @interpolate(flat) km: vec2<u32>, @location(4) sk: f32 };
 @vertex
 fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m: vec4<u32>) -> ROut {
-  var o: ROut; o.c = c.rgb; o.lat = c.a; o.km = vec2<u32>(m.x, m.w);
+  var o: ROut; o.c = c.rgb; o.lat = c.a; o.km = vec2<u32>(m.x, m.w); o.sk = 0.0;
   var q = p;
   // 夜間：遠處道路至少保持約 1 像素寬，城市路網的燈光才不會因為次像素而消失
   let night = G.sun_dir.w;
@@ -344,13 +344,22 @@ fn vs_road(@location(0) p: vec3<f32>, @location(1) c: vec4<f32>, @location(2) m:
   }
   o.w = q;
   o.pos = G.view_proj * vec4<f32>(q, 1.0);
+  // 地面以下：隧道（低於地面 12 m）不顯示；下沉式掘割把深度往鏡頭拉近，讓路面與擋土牆透過地表畫出來
+  let th = H(uv_of(q.x, q.z));
+  if (th > -5.0 && q.y < th - 12.0) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
+  else if (q.y < th - 0.5) {
+    o.sk = clamp((th - q.y) / 7.0, 0.0, 1.0);
+    let q2 = q + normalize(G.cam_pos.xyz - q) * (th - q.y + 3.0);
+    let c2 = G.view_proj * vec4<f32>(q2, 1.0);
+    o.pos.z = c2.z / c2.w * o.pos.w;
+  }
   // 通車日之前、拆除日之後不顯示（戰前舊路在新路網動工前拆除）
   if ((m.y > 0u && G.day.x < f32(m.y)) || (m.z > 0u && G.day.x >= f32(m.z))) { o.pos = vec4<f32>(0.0, 0.0, -2.0, 1.0); }
   return o;
 }
 @fragment
 fn fs_road(i: ROut) -> @location(0) vec4<f32> {
-  var col = light(to_lin(i.c), vec3<f32>(0.0, 1.0, 0.0));
+  var col = light(to_lin(i.c), vec3<f32>(0.0, 1.0, 0.0)) * (1.0 - 0.5 * i.sk);   // 掘割：路面在擋土牆陰影中
   let night = G.sun_dir.w;
   col = mix(col, col * 0.3 + vec3<f32>(0.01, 0.008, 0.006), night);
   col = mix(col, vec3<f32>(0.85), G.fog_col.w * 0.5);
